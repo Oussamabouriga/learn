@@ -412,3 +412,19 @@ plt.show()
 #   - Each heart has its own size, color, and position
 # ------------------------------------------------------------
 
+🧠 What You Learned from This Code
+
+Concept	Function	Explanation
+
+plt.fill()	Draws filled shape	Used for each heart
+Scale (scale*x, scale*y)	Controls size	Multiply by factor
+Shift (+ shift_x, + shift_y)	Controls position	Adds translation
+plt.figure()	Create a canvas	Used for a single plot
+plt.subplots()	Create grid of plots	Used for multiple subplots
+ax.axis('equal')	Fix proportions	Keeps heart symmetric
+plt.tight_layout()	Adjust spacing	Prevents overlap
+fig.suptitle()	Global title	Applies to all subplots
+
+
+
+---
