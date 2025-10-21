@@ -291,3 +291,124 @@ Il cherche qui parle, combien de poids chaque voix porte, et comment ces différ
 
 Souhaites-tu que je t’ajoute à la suite de ce fichier un **modèle Markdown dynamique** (avec sections “🧮 Calculs”, “📊 Graphiques”, “📈 Interprétation”) que tu pourras remplir à la main ou via Excel pour tes prochaines analyses NPS ?
 
+
+# ------------------------------------------------------------
+# 💖 CONTROL & POSITION MULTIPLE HEART SHAPES USING MATPLOTLIB
+# ------------------------------------------------------------
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+# ------------------------------------------------------------
+# STEP 1: Generate the heart coordinates using parametric equations
+# ------------------------------------------------------------
+# Equation of a heart shape (parametric)
+# x = 16 * sin^3(t)
+# y = 13*cos(t) - 5*cos(2t) - 2*cos(3t) - cos(4t)
+# t varies from 0 to 2π (full rotation)
+t = np.linspace(0, 2 * np.pi, 1000)
+
+x = 16 * np.sin(t) ** 3
+y = 13 * np.cos(t) - 5 * np.cos(2 * t) - 2 * np.cos(3 * t) - np.cos(4 * t)
+
+# ------------------------------------------------------------
+# EXAMPLE 1: Plot 3 hearts in the same figure (same Axes)
+# ------------------------------------------------------------
+
+plt.figure(figsize=(8, 6))  # Create one figure (width=8 inches, height=6 inches)
+
+# Heart 1 — original size, centered at origin
+plt.fill(x, y, color='red', alpha=0.6, label='Heart 1')
+
+# Heart 2 — smaller and moved to the right and up
+plt.fill(0.5 * x + 20, 0.5 * y + 10, color='magenta', alpha=0.6, label='Heart 2')
+
+# Heart 3 — larger and moved left/down
+plt.fill(1.3 * x - 15, 1.3 * y - 5, color='purple', alpha=0.5, label='Heart 3')
+
+# Keep aspect ratio equal (so the heart doesn’t stretch)
+plt.axis('equal')
+
+# Add title, legend, and display
+plt.title("💞 Example 1 — Three Hearts in the Same Plot")
+plt.legend()
+plt.show()
+
+# ------------------------------------------------------------
+# EXPLANATION (in comments):
+# ------------------------------------------------------------
+# plt.fill(x, y, ...) draws a filled shape based on arrays of x and y points.
+# Multiplying x and y by a scale factor (e.g., 0.5, 1.3) changes the size.
+# Adding or subtracting a constant (e.g., +20, -15) shifts the heart’s position.
+# Using alpha controls transparency.
+# Calling plt.fill() multiple times before plt.show() overlays all shapes
+# on the same coordinate system (same Axes).
+# ------------------------------------------------------------
+
+
+# ------------------------------------------------------------
+# EXAMPLE 2: Plot 4 hearts in separate subplots using plt.subplots()
+# ------------------------------------------------------------
+
+# Create a figure with 2 rows and 2 columns of subplots (4 in total)
+fig, axes = plt.subplots(2, 2, figsize=(10, 8))
+
+# Flatten the 2D array of Axes into a 1D list to iterate easily
+axes = axes.flatten()
+
+# Define properties for each heart: color, scale, x-shift, y-shift
+hearts = [
+    ('red', 1.0, 0, 0),
+    ('pink', 0.7, 20, 10),
+    ('purple', 1.3, -15, -5),
+    ('orange', 0.5, 10, -20)
+]
+
+# Loop through each subplot (ax) and draw one heart per subplot
+for i, ax in enumerate(axes):
+    color, scale, shift_x, shift_y = hearts[i]
+
+    # Draw the heart on its subplot
+    ax.fill(scale * x + shift_x, scale * y + shift_y, color=color, alpha=0.7)
+
+    # Equal aspect ratio so the heart is not distorted
+    ax.axis('equal')
+
+    # Optional: set custom limits to control visible area
+    ax.set_xlim(-40, 40)
+    ax.set_ylim(-40, 40)
+
+    # Add title to each subplot
+    ax.set_title(f"Heart {i+1} — scale={scale}, shift=({shift_x},{shift_y})")
+
+# Adjust spacing between subplots
+plt.tight_layout()
+
+# Add a main title for the whole figure
+fig.suptitle("💖 Example 2 — Four Hearts in Separate Subplots", fontsize=14, y=1.02)
+
+# Display all hearts
+plt.show()
+
+# ------------------------------------------------------------
+# EXPLANATION (in comments):
+# ------------------------------------------------------------
+# plt.subplots(r, c, figsize=(w,h)) creates a grid of subplots.
+#   - r = number of rows
+#   - c = number of columns
+# It returns:
+#   - fig : the global "canvas"
+#   - axes : an array of Axes objects (one per subplot)
+#
+# Each Axes acts like an independent mini-plot.
+# You can call ax.plot(), ax.fill(), ax.set_title() separately on each.
+#
+# axes.flatten() turns the 2D array (2x2) into a simple list for easy iteration.
+# plt.tight_layout() fixes spacing issues.
+# fig.suptitle() adds a global title for all subplots.
+#
+# Result:
+#   - 4 separate charts in one image
+#   - Each heart has its own size, color, and position
+# ------------------------------------------------------------
+
