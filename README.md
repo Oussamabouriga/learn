@@ -1,144 +1,135 @@
-# 💼 Salary Segment NPS Analysis
+import matplotlib.pyplot as plt
 
-Excellent 👌 You’re now describing a real-world data analytics task —  
-this is much more meaningful than simple averages.
+# ---------------------------
+# 1. Replace these with your data
+# ---------------------------
+periods = ["1h", "2h", "3d", "4d"]  # X-axis labels
+nps_values = [20, 35, 10, 45]       # Y-axis NPS values
+# ---------------------------
 
-Let’s build a **fully commented Python function** that does exactly what you described:
+plt.figure(figsize=(10, 6))
 
-We’ll calculate **salary segments**, then compute:
+# Plot line + points
+plt.plot(periods, nps_values, marker='o')
 
-- total number of people in each segment  
-- number of **Promoters** (evaluation score ≥ 9)  
-- number of **Passives** (evaluation score = 7 or 8)  
-- number of **Detractors** (evaluation score ≤ 6)  
-- and finally the **NPS** (Net Promoter Score = %Promoters − %Detractors)
+# Add text label next to each point
+for x, y in zip(periods, nps_values):
+    plt.text(x, y, f"{y}", ha='left', va='bottom')
 
----
+# Axis labels & title
+plt.xlabel("Period")
+plt.ylabel("NPS")
+plt.title("NPS Evolution Over Time")
 
-## ✅ Full Example (ready to copy into your `.ipynb` notebook)
+# Optional: grid for readability
+plt.grid(True)
 
-```python
-# Import the pandas library for data manipulation and analysis
-import pandas as pd
-
-# Define a function to calculate NPS (Net Promoter Score) by salary segment
-def calculate_nps_by_salary_segment(df, salary_col, eval_col):
-    """
-    Calculate NPS and counts by salary segment.
-    
-    Args:
-        df (pd.DataFrame): Input data containing salaries and evaluation scores.
-        salary_col (str): Name of the numeric column for salary.
-        eval_col (str): Name of the numeric column for evaluation scores (0-10 scale).
-    
-    Returns:
-        pd.DataFrame: Table with segment, counts, and NPS results.
-    """
-
-    # ─────────────────────────────
-    # 1️⃣ Define salary segments
-    # ─────────────────────────────
-
-    # Define salary range boundaries (from 0 to 1000, 1000 to 3000, and greater than 3000)
-    bins = [0, 1000, 3000, float('inf')]  
-
-    # Define labels (names) for each salary segment
-    labels = ["< 1000", "1000–3000", "> 3000"]
-
-    # Create a new column "salary_segment" in the DataFrame
-    # The pd.cut() function assigns each row to a range based on the salary value
-    df["salary_segment"] = pd.cut(df[salary_col], bins=bins, labels=labels, right=False)
-
-    # ─────────────────────────────
-    # 2️⃣ Define Promoter / Passive / Detractor
-    # ─────────────────────────────
-
-    # Promoters: evaluation score 9 or 10 → Boolean True/False
-    df["promoter"] = df[eval_col] >= 9
-
-    # Passives (neutral): evaluation score 7 or 8 → Boolean True/False
-    df["passive"] = df[eval_col].between(7, 8, inclusive="both")
-
-    # Detractors: evaluation score 0 to 6 → Boolean True/False
-    df["detractor"] = df[eval_col] <= 6
-
-    # ─────────────────────────────
-    # 3️⃣ Group by salary segment and count values
-    # ─────────────────────────────
-
-    # Group the dataset by the column "salary_segment"
-    # and aggregate different counts and sums
-    summary = (
-        df.groupby("salary_segment")  # Group by salary segment
-          .agg(
-              total_people=(salary_col, "count"),  # Count how many rows in each segment
-              promoters=("promoter", "sum"),       # Count how many promoters (True = 1)
-              passives=("passive", "sum"),         # Count how many passives (True = 1)
-              detractors=("detractor", "sum")      # Count how many detractors (True = 1)
-          )
-          .reset_index()  # Reset the index to make "salary_segment" a normal column again
-    )
-
-    # ─────────────────────────────
-    # 4️⃣ Compute percentages and NPS
-    # ─────────────────────────────
-
-    # Calculate % of promoters per segment
-    summary["%_promoters"] = (summary["promoters"] / summary["total_people"]) * 100
-
-    # Calculate % of detractors per segment
-    summary["%_detractors"] = (summary["detractors"] / summary["total_people"]) * 100
-
-    # NPS = % of promoters - % of detractors
-    summary["NPS"] = summary["%_promoters"] - summary["%_detractors"]
-
-    # ─────────────────────────────
-    # 5️⃣ Return a clean summary table
-    # ─────────────────────────────
-
-    # Select and order the final columns to display in the result
-    return summary[[
-        "salary_segment",      # Salary range label
-        "total_people",        # Number of people in that segment
-        "promoters",           # Count of promoters
-        "passives",            # Count of passives
-        "detractors",          # Count of detractors
-        "%_promoters",         # Percentage of promoters
-        "%_detractors",        # Percentage of detractors
-        "NPS"                  # Calculated Net Promoter Score
-    ]]
+plt.tight_layout()
+plt.show()
 
 
 
-Example Usage
+
+22222222
+
+import matplotlib.pyplot as plt
+
+# ---------------------------
+# Replace with your real data
+# ---------------------------
+programs = ["Program A", "Program B", "Program C", "Program D"]
+nps_values = [45, 20, 10, 55]
+# ---------------------------
+
+plt.figure(figsize=(10, 6))
+
+# Create bar chart
+plt.bar(programs, nps_values)
+
+# Add labels on top of each bar
+for i, value in enumerate(nps_values):
+    plt.text(i, value, f"{value}", ha='center', va='bottom')
+
+# Labels & title
+plt.xlabel("Program")
+plt.ylabel("NPS")
+plt.title("NPS Variation by Program")
+
+plt.grid(axis='y', linestyle='--', alpha=0.5)
+
+plt.tight_layout()
+plt.show()
 
 
 
-# Create an example dataset (replace this with your SQL data)
-data = {
-    "salary": [900, 1200, 2500, 3100, 4000, 2800, 1500, 800, 5000, 1800],
-    "evaluation_score": [6, 8, 9, 10, 5, 7, 9, 4, 10, 6]
-}
+3333333333
+import matplotlib.pyplot as plt
 
-# Convert the dictionary into a pandas DataFrame
-df = pd.DataFrame(data)
+# ---------------------------
+# Replace with your real data
+# ---------------------------
+months = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug"]
+nps_values = [25, 30, 28, 40, 35, 45, 50, 47]
+# ---------------------------
 
-# Call the function, specifying column names
-results = calculate_nps_by_salary_segment(df, salary_col="salary", eval_col="evaluation_score")
+plt.figure(figsize=(12, 6))
 
-# Display the resulting summary DataFrame
-results
+# Line plot with markers
+plt.plot(months, nps_values, marker='o')
+
+# Add NPS labels next to each point
+for x, y in zip(months, nps_values):
+    plt.text(x, y, f"{y}", ha='left', va='bottom')
+
+# Labels & title
+plt.xlabel("Month")
+plt.ylabel("NPS")
+plt.title("NPS Evolution Over the Months")
+
+# Add grid
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
 
 
-Tips
+44444444444444444
+import matplotlib.pyplot as plt
 
-You can easily adjust the salary segmentation ranges:
+# ---------------------------
+# Replace with your real data
+# ---------------------------
+periods = ["1h", "2h", "3d", "4d"]     # X-axis labels
+nps_values = [20, 35, 10, 45]          # NPS curve
+delta_sat_values = [5, 15, -5, 20]     # Delta SAT curve (example)
+# ---------------------------
 
-# Example: adding more refined ranges
-bins = [0, 1000, 2000, 4000, float('inf')]
-labels = ["<1000", "1000–1999", "2000–3999", "≥4000"]
+plt.figure(figsize=(10, 6))
 
-If your SQL data already has column names like salaire or evaluationScore, just pass them to the function arguments:
+# NPS curve
+plt.plot(periods, nps_values, marker='o', label="NPS")
 
+# Delta SAT curve (blue)
+plt.plot(periods, delta_sat_values, marker='o', color='blue', label="Delta SAT")
 
-results = calculate_nps_by_salary_segment(df, salary_col="salaire", eval_col="evaluationScore")
+# Add text labels for NPS
+for x, y in zip(periods, nps_values):
+    plt.text(x, y, f"{y}", ha='left', va='bottom')
+
+# Add text labels for Delta SAT
+for x, y in zip(periods, delta_sat_values):
+    plt.text(x, y, f"{y}", ha='right', va='bottom', color='blue')
+
+# Axis labels & title
+plt.xlabel("Period")
+plt.ylabel("Score")
+plt.title("NPS & Delta SAT Evolution Over Time")
+
+# Legend
+plt.legend()
+
+# Grid
+plt.grid(True)
+
+plt.tight_layout()
+plt.show()
