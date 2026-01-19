@@ -1,72 +1,80 @@
-ARTIFICIAL INTELLIGENCE (AI)
-│
-└── MACHINE LEARNING (ML)
-    │
-    ├── SUPERVISED LEARNING
-    │   │
-    │   ├── CLASSIFICATION (Discrete labels)
-    │   │   │
-    │   │   ├── Linear Models
-    │   │   │   ├── Logistic Regression
-    │   │   │   └── LDA
-    │   │   │
-    │   │   ├── Tree-Based
-    │   │   │   ├── Decision Tree
-    │   │   │   ├── Random Forest
-    │   │   │   ├── XGBoost
-    │   │   │   ├── LightGBM
-    │   │   │   └── CatBoost
-    │   │   │
-    │   │   ├── Distance-Based
-    │   │   │   └── KNN
-    │   │   │
-    │   │   ├── Margin-Based
-    │   │   │   └── SVM
-    │   │   │
-    │   │   └── Probabilistic
-    │   │       └── Naive Bayes
-    │   │
-    │   └── REGRESSION (Continuous values)
-    │       │
-    │       ├── Linear Regression
-    │       ├── Ridge / Lasso
-    │       ├── Decision Tree Regressor
-    │       ├── Random Forest Regressor
-    │       ├── XGBoost Regressor  ⭐
-    │       ├── LightGBM Regressor ⭐
-    │       └── CatBoost Regressor ⭐
-    │
-    ├── UNSUPERVISED LEARNING
-    │   │
-    │   ├── Clustering
-    │   │   ├── K-Means
-    │   │   ├── DBSCAN
-    │   │   └── Hierarchical
-    │   │
-    │   ├── Dimensionality Reduction
-    │   │   ├── PCA
-    │   │   ├── t-SNE
-    │   │   └── UMAP
-    │   │
-    │   └── Anomaly Detection
-    │       ├── Isolation Forest
-    │       └── One-Class SVM
-    │
-    └── REINFORCEMENT LEARNING
-        │
-        ├── Q-Learning
-        ├── Deep Q-Network (DQN)
-        └── Policy Gradient
+# Artificial Intelligence (AI) – Algorithm Overview
 
-└── DEEP LEARNING (DL)
-    │
-    ├── Feedforward Neural Networks (MLP)
-    ├── CNN (Images)
-    ├── RNN / LSTM (Sequences)
-    ├── Transformers
-    └── Tabular DL
-        ├── TabNet
-        └── NODE
+## Artificial Intelligence (AI)
+
+### Machine Learning (ML)
+
+#### Supervised Learning
+
+##### Classification (Discrete Labels)
+
+- **Linear Models**
+  - Logistic Regression  
+  - Linear Discriminant Analysis (LDA)
+
+- **Tree-Based Models**
+  - Decision Tree  
+  - Random Forest  
+  - XGBoost  
+  - LightGBM  
+  - CatBoost  
+
+- **Distance-Based**
+  - K-Nearest Neighbors (KNN)
+
+- **Margin-Based**
+  - Support Vector Machine (SVM)
+
+- **Probabilistic**
+  - Naive Bayes
+
+##### Regression (Continuous Values)
+
+- Linear Regression  
+- Ridge / Lasso Regression  
+- Decision Tree Regressor  
+- Random Forest Regressor  
+- XGBoost Regressor  
+- LightGBM Regressor  
+- CatBoost Regressor  
+
+---
+
+#### Unsupervised Learning
+
+##### Clustering
+- K-Means  
+- DBSCAN  
+- Hierarchical Clustering  
+
+##### Dimensionality Reduction
+- PCA (Principal Component Analysis)  
+- t-SNE  
+- UMAP  
+
+##### Anomaly Detection
+- Isolation Forest  
+- One-Class SVM  
+
+---
+
+#### Reinforcement Learning
+
+- Q-Learning  
+- Deep Q-Network (DQN)  
+- Policy Gradient  
+
+---
+
+### Deep Learning (DL)
+
+- Feedforward Neural Networks (MLP)  
+- Convolutional Neural Networks (CNN – Images)  
+- Recurrent Neural Networks (RNN / LSTM – Sequences)  
+- Transformers  
+- Tabular Deep Learning
+  - TabNet  
+  - NODE (Neural Oblivious Decision Trees)
 
 
 
@@ -413,14 +421,3 @@ Transparent explanations
 Business-ready insights
 
 
-If you want, I can also provide:
-
-A PDF version
-
-A PowerPoint version
-
-A Notion template
-
-A full project checklist
-
-A Python notebook structure
