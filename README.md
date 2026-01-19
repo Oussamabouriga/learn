@@ -22,3 +22,21 @@ SELECT
     END
   ) AS working_hours_excluding_weekends
 -- No joins needed, just use your date variables
+
+
+WITH RECURSIVE seq AS (
+  SELECT 0 AS n
+  UNION ALL
+  SELECT n + 1
+  FROM seq
+  WHERE n < TIMESTAMPDIFF(HOUR, sin.Date_de_completude, sin.Date_de_decision)
+)
+SELECT
+  SUM(
+    CASE
+      WHEN WEEKDAY(DATE_ADD(sin.Date_de_completude, INTERVAL seq.n HOUR)) BETWEEN 0 AND 4
+       AND HOUR(DATE_ADD(sin.Date_de_completude, INTERVAL seq.n HOUR)) BETWEEN 8 AND 16
+      THEN 1 ELSE 0
+    END
+  ) AS working_hours_excluding_weekends
+FROM seq;
