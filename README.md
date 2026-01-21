@@ -1,42 +1,24 @@
-SELECT 
-  FLOOR(
-    TIMESTAMPDIFF(HOUR, sin.Date_de_completude, sin.Date_de_decision) 
-    - 24 * (
-      (DATEDIFF(sin.Date_de_decision, sin.Date_de_completude) + 1) -- total days
-      - (DATEDIFF(sin.Date_de_decision, sin.Date_de_completude) + 1 
-         - SUM(CASE WHEN WEEKDAY(DATE_ADD(sin.Date_de_completude, INTERVAL seq DAY)) IN (5,6) THEN 1 ELSE 0 END)
-      )
-    )
-  ) AS delai_decision_hour_skip_weekend
--- No join needed, just use your date variables
+-- Fix for DELAI_COMMANDE (Lines 1679-1685)
+CASE 
+    WHEN tr_commande.CDE_ADVANCED_SWAP_VALIDEE IS NULL 
+        THEN FLOOR(TIMESTAMPDIFF(MINUTE, tr_commande.CDE_ORDER_VALIDEE, sin.Resolved_Time))
+    WHEN tr_commande.CDE_ORDER_VALIDEE IS NULL 
+        THEN FLOOR(TIMESTAMPDIFF(MINUTE, tr_commande.CDE_ADVANCED_SWAP_VALIDEE, sin.Resolved_Time))
+    WHEN tr_commande.CDE_ORDER_VALIDEE IS NOT NULL AND tr_commande.CDE_ADVANCED_SWAP_VALIDEE IS NOT NULL 
+        THEN FLOOR(TIMESTAMPDIFF(MINUTE, tr_commande.CDE_ORDER_VALIDEE, sin.Resolved_Time)) + 
+             FLOOR(TIMESTAMPDIFF(MINUTE, tr_commande.CDE_ADVANCED_SWAP_VALIDEE, sin.Resolved_Time))
+    ELSE 0 
+END AS DELAI_COMMANDE,
 
-
-
-SELECT 
-  SUM(
-    CASE 
-      WHEN WEEKDAY(DATE_ADD(sin.Date_de_completude, INTERVAL seq HOUR)) BETWEEN 0 AND 4 -- Monday to Friday
-      AND HOUR(DATE_ADD(sin.Date_de_completude, INTERVAL seq HOUR)) BETWEEN 8 AND 16 -- 8 AM to 4:59 PM
-      THEN 1
-      ELSE 0
-    END
-  ) AS working_hours_excluding_weekends
--- No joins needed, just use your date variables
-
-
-WITH RECURSIVE seq AS (
-  SELECT 0 AS n
-  UNION ALL
-  SELECT n + 1
-  FROM seq
-  WHERE n < TIMESTAMPDIFF(HOUR, sin.Date_de_completude, sin.Date_de_decision)
-)
-SELECT
-  SUM(
-    CASE
-      WHEN WEEKDAY(DATE_ADD(sin.Date_de_completude, INTERVAL seq.n HOUR)) BETWEEN 0 AND 4
-       AND HOUR(DATE_ADD(sin.Date_de_completude, INTERVAL seq.n HOUR)) BETWEEN 8 AND 16
-      THEN 1 ELSE 0
-    END
-  ) AS working_hours_excluding_weekends
-FROM seq;
+-- Fix for DELAI_COMMANDE_SAV (Lines 1688-1693)
+CASE 
+    WHEN tr_commande.SAV_ADVANCED_SWAP_VALIDEE IS NULL AND tr_commande.SAV_AUDIT_VALIDEE IS NULL AND tr_commande.SAV_RC_VALIDEE IS NULL 
+        THEN FLOOR(TIMESTAMPDIFF(MINUTE, tr_commande.SAV_REPAIRLOCAL_VALIDEE, sin.Resolved_Time))
+    WHEN tr_commande.SAV_REPAIRLOCAL_VALIDEE IS NULL AND tr_commande.SAV_AUDIT_VALIDEE IS NULL AND tr_commande.SAV_RC_VALIDEE IS NULL 
+        THEN FLOOR(TIMESTAMPDIFF(MINUTE, tr_commande.SAV_ADVANCED_SWAP_VALIDEE, sin.Resolved_Time))
+    WHEN tr_commande.SAV_REPAIRLOCAL_VALIDEE IS NULL AND tr_commande.SAV_ADVANCED_SWAP_VALIDEE IS NULL AND tr_commande.SAV_RC_VALIDEE IS NULL 
+        THEN FLOOR(TIMESTAMPDIFF(MINUTE, tr_commande.SAV_AUDIT_VALIDEE, sin.Resolved_Time))
+    WHEN tr_commande.SAV_REPAIRLOCAL_VALIDEE IS NULL AND tr_commande.SAV_ADVANCED_SWAP_VALIDEE IS NULL AND tr_commande.SAV_AUDIT_VALIDEE IS NULL 
+        THEN FLOOR(TIMESTAMPDIFF(MINUTE, tr_commande.SAV_RC_VALIDEE, sin.Resolved_Time))
+    ELSE 0 
+END AS DELAI_COMMANDE_SAV,
