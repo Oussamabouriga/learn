@@ -19,3 +19,6 @@ missing_count = (
 )
 
 missing_count
+
+
+(df.select_dtypes(include="number") == 0).sum().sum()
