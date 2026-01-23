@@ -7,3 +7,15 @@ missing_report = (
 )
 
 missing_report
+
+
+
+import numpy as np
+
+missing_count = (
+    df.replace(r"^\s*$", np.nan, regex=True)
+      .isna()
+      .sum()
+)
+
+missing_count
