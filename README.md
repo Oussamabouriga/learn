@@ -85,9 +85,7 @@ dist_gender_car_combined
 
 
 
-dist_gender_combined.index = dist_gender_combined.index.map({
-    0: "Male",
-    1: "Female"
-})
+dist_gender_table = dist_gender_combined.reset_index()
+dist_gender_table.rename(columns={"index": "Gender"}, inplace=True)
 
 ```
