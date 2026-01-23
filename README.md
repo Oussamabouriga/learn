@@ -56,6 +56,48 @@ import matplotlib.colors as mcolors
 list(mcolors.CSS4_COLORS.keys())[:30]
 
 
+import pandas as pd
+
+# Count occurrences for each (evaluate_note, nombre_ko)
+dist_ko_count = (
+    df.groupby(["evaluate_note", "nombre_ko"])
+      .size()
+      .reset_index(name="count")
+)
+
+# Pivot to matrix: rows = evaluate_note, columns = nombre_ko
+pivot_ko_count = (
+    dist_ko_count.pivot(
+        index="evaluate_note",
+        columns="nombre_ko",
+        values="count"
+    )
+    .fillna(0)
+    .astype(int)
+    .sort_index()
+)
+
+# Ensure columns 0..5 exist and ordered
+pivot_ko_count = pivot_ko_count.reindex(columns=range(0, 6), fill_value=0)
+
+pivot_ko_count
+
+
+
+from tabulate import tabulate
+
+# Move index to a column for stable display
+pivot_ko_table = pivot_ko_count.reset_index()
+pivot_ko_table.rename(columns={"evaluate_note": "Evaluation note"}, inplace=True)
+
+print(
+    tabulate(
+        pivot_ko_table,
+        headers="keys",
+        tablefmt="fancy_grid",
+        showindex=False
+    )
+)
 
 
 
