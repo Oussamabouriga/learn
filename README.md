@@ -22,3 +22,5 @@ missing_count
 
 
 (df.select_dtypes(include="number") == 0).sum().sum()
+
+(df.select_dtypes(include="number") == 0).sum()
