@@ -1,43 +1,44 @@
 
 ```
-from tabulate import tabulate
+import matplotlib.pyplot as plt
 
-# Build distribution
-dist_gender_car = (
-    df.groupby(["gender", "car"])["satisfaction"]
-      .value_counts()
-      .unstack(fill_value=0)
-      .sort_index()
+# Use percentage table (numeric, not combined strings)
+plot_df = dist_dossier_ai_pct.copy()
+
+plt.figure(figsize=(10, 6))
+
+plot_df.plot(
+    kind="bar",
+    stacked=True
 )
 
-# Percentages within each (gender, car)
-dist_gender_car_pct = (
-    dist_gender_car.div(dist_gender_car.sum(axis=1), axis=0) * 100
-).round(2)
+plt.ylabel("Percentage (%)")
+plt.xlabel("Group")
+plt.title("Influence of Dossier Completion and AI on Evaluation Distribution")
+plt.legend(title="Evaluation note", bbox_to_anchor=(1.05, 1), loc="upper left")
+plt.tight_layout()
+plt.show()
 
-# Combine count + percentage
-dist_gender_car_combined = (
-    dist_gender_car.astype(str) + " (" + dist_gender_car_pct.astype(str) + "%)"
+plt.figure(figsize=(10, 6))
+
+plt.imshow(dist_dossier_ai_pct, aspect="auto")
+plt.colorbar(label="Percentage (%)")
+
+plt.yticks(
+    range(len(dist_dossier_ai_pct.index)),
+    dist_dossier_ai_pct.index
+)
+plt.xticks(
+    range(len(dist_dossier_ai_pct.columns)),
+    dist_dossier_ai_pct.columns
 )
 
-# Human-readable labels
-dist_gender_car_combined.index = dist_gender_car_combined.index.map(
-    lambda x: f"{'Male' if x[0]==0 else 'Female'} - {'Car' if x[1]==1 else 'No Car'}"
-)
+plt.xlabel("Evaluation note")
+plt.ylabel("Group")
+plt.title("Heatmap of Evaluation Distribution by Group")
+plt.tight_layout()
+plt.show()
 
-# 👉 IMPORTANT: move index to a column for tabulate
-dist_gender_car_table = dist_gender_car_combined.reset_index()
-dist_gender_car_table.rename(columns={"index": "Group"}, inplace=True)
-
-# Display with tabulate
-print(
-    tabulate(
-        dist_gender_car_table,
-        headers="keys",
-        tablefmt="fancy_grid",
-        showindex=False
-    )
-)
 
 
 ```
