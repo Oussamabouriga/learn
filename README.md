@@ -641,6 +641,26 @@ Plots → numeric DataFrames only
 Avoid loops, use vectorization
 
 
+Qualitative (Categorical) and Quantitative (Numerical).
+Here is the simple breakdown of the four types shown:
+1. Qualitative Data (Categories)
+This describes qualities or characteristics.
+ * Nominal Data: Used for naming or labeling variables without any specific order.
+   * Example: Colors, Gender, or Country names.
+ * Ordinal Data: Data that follows a clear order or rank, but the difference between them isn't measured.
+   * Example: Satisfaction ratings (Happy/Neutral/Sad) or finishing a race in 1st, 2nd, or 3rd place.
+2. Quantitative Data (Numbers)
+This describes measurable quantities.
+ * Discrete Data: Countable numbers that are usually whole (you can't have half a person).
+   * Example: The number of students in a class or the number of cars in a lot.
+ * Continuous Data: Measurable values that can be broken down into infinite decimals.
+   * Example: A person's height, weight, or the exact temperature outside.
+In short:
+ * Nominal: Labels only.
+ * Ordinal: Labels in order.
+ * Discrete: Counted numbers.
+ * Continuous: Measured numbers.
+
 
 
 
