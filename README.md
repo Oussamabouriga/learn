@@ -664,3 +664,19 @@ In short:
 
 
 
+
+# Split safely whether there is 1 word or many
+parts = (
+    df["cadeau"]
+    .fillna("")                  # handle NaN
+    .astype(str)
+    .str.split(",", expand=True) # split into columns
+    .apply(lambda col: col.str.strip())
+)
+
+# Rename columns
+parts.columns = [f"word_{i+1}" for i in range(parts.shape[1])]
+
+# Join back to original dataframe
+df = df.join(parts)
+
