@@ -13,29 +13,17 @@ def plot_distribution(
     as_percent=False,
     sort="auto",           # "auto" | "index" | "count"
     other_label="Other",
-    figsize=(10, 5),
-    cmap_name="tab20"      # change to "Set2", "Dark2", "viridis", etc.
+    cmap_name="tab20",
+    grid=True
 ):
-    """
-    Pro distribution plot for any DataFrame column.
-    - top_n: show top N categories; remaining aggregated into 'Other'
-    - include_na: include NaN as a category
-    - as_percent: plot percentages instead of counts
-    - sort:
-        * auto: numeric small categories -> sort by index; else sort by count
-        * index: sort by category value
-        * count: sort by frequency
-    """
-
     s = df[col]
 
     # value counts
     vc = s.value_counts(dropna=not include_na)
 
-    # Decide sorting
+    # sorting
     if sort == "auto":
         is_numeric = pd.api.types.is_numeric_dtype(s)
-        # if numeric and not too many unique values -> sort by index (0..10, 0..5, etc.)
         if is_numeric and vc.index.nunique() <= 30:
             vc = vc.sort_index()
         else:
@@ -45,62 +33,93 @@ def plot_distribution(
     elif sort == "count":
         vc = vc.sort_values(ascending=False)
 
-    # Top N + Other
+    # top N + other
     if top_n is not None and len(vc) > top_n:
         top = vc.iloc[:top_n]
         other = vc.iloc[top_n:].sum()
         vc = pd.concat([top, pd.Series({other_label: other})])
 
-    # Convert index to string labels (for clean display)
     labels = vc.index.astype(str)
-    values = vc.values
+    counts = vc.values
+    total = counts.sum()
+    pct = (counts / total * 100) if total > 0 else np.zeros_like(counts, dtype=float)
 
-    # Percentages (for labels + optional plotting)
-    total = values.sum()
-    pct = (values / total * 100) if total > 0 else np.zeros_like(values)
-
-    y = pct if as_percent else values
+    y = pct if as_percent else counts
     ylabel = "Percentage (%)" if as_percent else "Count"
 
-    # Choose orientation
-    horizontal = len(vc) > 10  # many categories -> horizontal is clearer
+    # --- Adaptive sizing ---
+    n = len(vc)
+    max_label_len = max((len(x) for x in labels), default=1)
 
-    plt.figure(figsize=figsize)
-
-    cmap = plt.get_cmap(cmap_name)
-    colors = [cmap(i / max(len(vc)-1, 1)) for i in range(len(vc))]
+    # If many categories OR long labels => horizontal plot
+    horizontal = (n >= 8) or (max_label_len >= 12)
 
     if horizontal:
-        bars = plt.barh(labels, y, color=colors)
+        width = 10
+        height = max(4, min(0.5 * n + 1.5, 14))   # grows with number of categories
+    else:
+        width = max(8, min(0.6 * n + 5, 14))
+        height = 5
+
+    plt.figure(figsize=(width, height))
+
+    # Color palette
+    cmap = plt.get_cmap(cmap_name)
+    colors = [cmap(i / max(n - 1, 1)) for i in range(n)]
+
+    # --- Plot ---
+    if horizontal:
+        bars = plt.barh(labels, y, color=colors, edgecolor="black", linewidth=0.3)
         plt.xlabel(ylabel)
         plt.ylabel(col)
+
+        # Grid
+        if grid:
+            plt.grid(axis="x", linestyle="--", alpha=0.35)
+
+        # Labels on bars
+        x_pad = 0.01 * (max(y) if len(y) else 1)
+        for i, b in enumerate(bars):
+            val = b.get_width()
+            txt = f"{counts[i]} ({pct[i]:.2f}%)"
+            plt.text(val + x_pad, b.get_y() + b.get_height()/2, txt,
+                     va="center", fontsize=9)
+
     else:
-        bars = plt.bar(labels, y, color=colors)
+        bars = plt.bar(labels, y, color=colors, edgecolor="black", linewidth=0.3)
         plt.ylabel(ylabel)
         plt.xlabel(col)
-        plt.xticks(rotation=30, ha="right")
+
+        # Grid
+        if grid:
+            plt.grid(axis="y", linestyle="--", alpha=0.35)
+
+        # Rotate x labels only if needed
+        if max_label_len >= 6:
+            plt.xticks(rotation=30, ha="right")
+
+        # Labels on bars
+        y_pad = 0.01 * (max(y) if len(y) else 1)
+        for i, b in enumerate(bars):
+            val = b.get_height()
+            txt = f"{counts[i]}\n({pct[i]:.2f}%)"
+            plt.text(b.get_x() + b.get_width()/2, val + y_pad, txt,
+                     ha="center", va="bottom", fontsize=9)
 
     plot_title = title if title else f"Distribution of {col}"
-    plt.title(plot_title)
-
-    # Add labels on bars: count + %
-    for i, b in enumerate(bars):
-        if horizontal:
-            x = b.get_width()
-            txt = f"{values[i]} ({pct[i]:.2f}%)"
-            plt.text(x + (0.01 * max(y) if len(y) else 0), b.get_y() + b.get_height()/2,
-                     txt, va="center", fontsize=9)
-        else:
-            h = b.get_height()
-            txt = f"{values[i]}\n({pct[i]:.2f}%)"
-            plt.text(b.get_x() + b.get_width()/2, h + (0.01 * max(y) if len(y) else 0),
-                     txt, ha="center", va="bottom", fontsize=9)
+    plt.title(plot_title, fontsize=14, fontweight="bold")
 
     plt.tight_layout()
     plt.show()
 
-```
 
+```
+```
+plot_distribution(df, "evaluate_note", title="Distribution: evaluate_note (0–10)", sort="index", top_n=None, cmap_name="Set2")
+plot_distribution(df, "PARCOURS_FINAL", title="Distribution: PARCOURS_FINAL", top_n=10, sort="count", cmap_name="tab20")
+plot_distribution(df, "decision_ai", title="Distribution: Decision AI", sort="index", top_n=None, cmap_name="Set2")
+
+```
 
 ```
 plot_distribution(df, "evaluate_note", title="Distribution: evaluate_note (0–10)", sort="index", top_n=None)
