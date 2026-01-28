@@ -1,154 +1,168 @@
 ```
 import pandas as pd
 
-def evalnote_by_binary_table(df, eval_col, bin_col):
-    tmp = df[[eval_col, bin_col]].dropna()
-    tmp[bin_col] = pd.to_numeric(tmp[bin_col], errors="coerce")
-    tmp = tmp[tmp[bin_col].isin([0, 1])]
+def make_grouped_dist(df, x_col, group_col, group_order=None, x_order=None, normalize="x"):
+    """
+    normalize:
+      - "x"   => percentage inside each x (each evaluate_note sums to 100%)
+      - "all" => percentage over whole dataset
+      - None  => no percentage
+    """
+    tmp = df[[x_col, group_col]].dropna()
 
-    counts = tmp.groupby([eval_col, bin_col]).size().unstack(fill_value=0).sort_index()
-    pct = (counts.div(counts.sum(axis=0), axis=1) * 100).round(2)  # % within each binary group
+    # counts matrix: rows=x, cols=group
+    counts = tmp.groupby([x_col, group_col]).size().unstack(fill_value=0)
+
+    if x_order is not None:
+        counts = counts.reindex(index=x_order, fill_value=0)
+    else:
+        counts = counts.sort_index()
+
+    if group_order is not None:
+        counts = counts.reindex(columns=group_order, fill_value=0)
+    else:
+        counts = counts.sort_index(axis=1)
+
+    if normalize == "x":
+        pct = (counts.div(counts.sum(axis=1), axis=0) * 100).round(2)
+    elif normalize == "all":
+        pct = (counts / counts.values.sum() * 100).round(2)
+    else:
+        pct = None
+
     return counts, pct
 
-
+import numpy as np
 import matplotlib.pyplot as plt
 
-def evalnote_by_binary_plot(df, eval_col, bin_col, labels={0:"0", 1:"1"}, cmap="Set2", figsize=(12,6), min_pct=3):
-    counts, pct = evalnote_by_binary_table(df, eval_col, bin_col)
+def plot_grouped_bars(counts, pct=None, title="", xlabel="", ylabel="Count",
+                      group_labels=None, colors=None, show_pct=True, show_count=True,
+                      figsize=(14,6), rotate_xticks=0):
+    """
+    counts: DataFrame (rows=x, cols=groups)
+    pct:    DataFrame same shape as counts (optional)
+    group_labels: dict mapping {original_col_value: "label"}
+    colors: list of color names (one per group) e.g. ["steelblue","orange"]
+    """
 
-    # rename legend labels
-    pct = pct.rename(columns=labels)
-
-    ax = pct.plot(kind="bar", stacked=True, figsize=figsize, colormap=cmap, edgecolor="black", linewidth=0.3)
-    ax.set_title(f"{eval_col} distribution by {bin_col}", fontweight="bold")
-    ax.set_xlabel(eval_col)
-    ax.set_ylabel("Percentage (%)")
-    ax.grid(axis="y", linestyle="--", alpha=0.35)
-
-    # labels inside segments: count + %
-    # (containers correspond to columns after rename)
-    counts_for_labels = counts.rename(columns=labels)
-    for j, g in enumerate(pct.columns):
-        for i in range(len(pct.index)):
-            p = float(pct.iloc[i, j])
-            c = int(counts_for_labels.iloc[i, j])
-            if c == 0 or p < min_pct:
-                continue
-            rect = ax.containers[j][i]
-            ax.text(rect.get_x() + rect.get_width()/2,
-                    rect.get_y() + rect.get_height()/2,
-                    f"{c}\n{p:.1f}%",
-                    ha="center", va="center", fontsize=8)
-
-    ax.legend(title=bin_col, bbox_to_anchor=(1.02, 1), loc="upper left")
-    plt.tight_layout()
-    plt.show()
-
-
-
-evalnote_by_binary_plot(df, "evaluate_note", "decision_ai", labels={0:"Sans AI", 1:"Avec AI"})
-evalnote_by_binary_plot(df, "evaluate_note", "dossier_complet", labels={0:"Non complet", 1:"Complet"})
-
-```
-
-
-```
-def evalnote_by_category_table(df, eval_col, cat_col, top_groups=8, other="Other"):
-    tmp = df[[eval_col, cat_col]].dropna()
-    tmp[cat_col] = tmp[cat_col].astype(str).str.strip()
-
-    # keep top groups
-    top = tmp[cat_col].value_counts().head(top_groups).index
-    tmp[cat_col] = tmp[cat_col].where(tmp[cat_col].isin(top), other)
-
-    counts = tmp.groupby([eval_col, cat_col]).size().unstack(fill_value=0).sort_index()
-    pct = (counts.div(counts.sum(axis=0), axis=1) * 100).round(2)
-    return counts, pct
-
-
-def evalnote_by_category_plot(df, eval_col, cat_col, top_groups=8, cmap="tab20", figsize=(14,6), min_pct=4):
-    counts, pct = evalnote_by_category_table(df, eval_col, cat_col, top_groups=top_groups)
-
-    ax = pct.plot(kind="bar", stacked=True, figsize=figsize, colormap=cmap, edgecolor="black", linewidth=0.3)
-    ax.set_title(f"{eval_col} distribution by {cat_col} (top {top_groups} + Other)", fontweight="bold")
-    ax.set_xlabel(eval_col)
-    ax.set_ylabel("Percentage (%)")
-    ax.grid(axis="y", linestyle="--", alpha=0.35)
+    x_vals = counts.index.tolist()
+    groups = counts.columns.tolist()
+    n_groups = len(groups)
 
     # labels
-    for j in range(pct.shape[1]):
-        for i in range(pct.shape[0]):
-            p = float(pct.iloc[i, j])
-            c = int(counts.iloc[i, j])
-            if c == 0 or p < min_pct:
+    if group_labels:
+        legend_names = [group_labels.get(g, str(g)) for g in groups]
+    else:
+        legend_names = [str(g) for g in groups]
+
+    # colors
+    if colors is None:
+        # default nice palette
+        colors = ["steelblue", "seagreen", "orange", "slategray", "purple", "goldenrod"]
+    colors = (colors * 10)[:n_groups]
+
+    x = np.arange(len(x_vals))
+    width = 0.8 / n_groups  # fill 80% of space
+
+    fig, ax = plt.subplots(figsize=figsize)
+
+    for i, g in enumerate(groups):
+        y = counts[g].values
+        bars = ax.bar(x + (i - (n_groups-1)/2)*width, y, width,
+                      label=legend_names[i], color=colors[i], edgecolor="black", linewidth=0.3)
+
+        # bar labels
+        for j, b in enumerate(bars):
+            c = int(y[j])
+            if c == 0:
                 continue
-            rect = ax.containers[j][i]
-            ax.text(rect.get_x() + rect.get_width()/2,
-                    rect.get_y() + rect.get_height()/2,
-                    f"{c}\n{p:.1f}%",
-                    ha="center", va="center", fontsize=8)
 
-    ax.legend(title=cat_col, bbox_to_anchor=(1.02, 1), loc="upper left")
-    plt.tight_layout()
-    plt.show()
+            parts = []
+            if show_count:
+                parts.append(str(c))
+            if show_pct and pct is not None:
+                parts.append(f"{pct[g].iloc[j]:.1f}%")
+            txt = "\n".join(parts)
 
+            ax.text(b.get_x() + b.get_width()/2,
+                    b.get_height(),
+                    txt,
+                    ha="center", va="bottom", fontsize=8)
 
-evalnote_by_category_plot(df, "evaluate_note", "PARCOURS_FINAL", top_groups=8)
-evalnote_by_category_plot(df, "evaluate_note", "PARCOURS_INITIAL", top_groups=8)
-
-
-```
-
-```
-def evalnote_by_countbin_table(df, eval_col, count_col, bins, labels):
-    tmp = df[[eval_col, count_col]].dropna()
-    tmp[count_col] = pd.to_numeric(tmp[count_col], errors="coerce")
-    tmp = tmp.dropna()
-    tmp["bin"] = pd.cut(tmp[count_col], bins=bins, labels=labels, include_lowest=True, right=True)
-
-    counts = tmp.groupby([eval_col, "bin"]).size().unstack(fill_value=0).sort_index()
-    pct = (counts.div(counts.sum(axis=0), axis=1) * 100).round(2)
-    return counts, pct
-
-
-def evalnote_by_countbin_plot(df, eval_col, count_col, bins, labels, cmap="Set3", figsize=(14,6), min_pct=4):
-    counts, pct = evalnote_by_countbin_table(df, eval_col, count_col, bins, labels)
-
-    ax = pct.plot(kind="bar", stacked=True, figsize=figsize, colormap=cmap, edgecolor="black", linewidth=0.3)
-    ax.set_title(f"{eval_col} distribution by {count_col} (binned)", fontweight="bold")
-    ax.set_xlabel(eval_col)
-    ax.set_ylabel("Percentage (%)")
+    ax.set_title(title, fontweight="bold")
+    ax.set_xlabel(xlabel)
+    ax.set_ylabel(ylabel)
+    ax.set_xticks(x)
+    ax.set_xticklabels(x_vals, rotation=rotate_xticks)
     ax.grid(axis="y", linestyle="--", alpha=0.35)
-
-    for j in range(pct.shape[1]):
-        for i in range(pct.shape[0]):
-            p = float(pct.iloc[i, j])
-            c = int(counts.iloc[i, j])
-            if c == 0 or p < min_pct:
-                continue
-            rect = ax.containers[j][i]
-            ax.text(rect.get_x() + rect.get_width()/2,
-                    rect.get_y() + rect.get_height()/2,
-                    f"{c}\n{p:.1f}%",
-                    ha="center", va="center", fontsize=8)
-
-    ax.legend(title=f"{count_col} bin", bbox_to_anchor=(1.02, 1), loc="upper left")
+    ax.legend(title="Group", bbox_to_anchor=(1.02, 1), loc="upper left")
     plt.tight_layout()
     plt.show()
 
-bins_ko    = [-0.1, 0, 1, 2, 3, 4, 5]
-labels_ko  = ["0","1","2","3","4","5"]
-evalnote_by_countbin_plot(df, "evaluate_note", "nombre_prestation_ko", bins_ko, labels_ko)
+
+counts, pct = make_grouped_dist(
+    df,
+    x_col="evaluate_note",
+    group_col="decision_ai",
+    x_order=range(0, 11),
+    group_order=[0, 1],
+    normalize="x"
+)
+
+plot_grouped_bars(
+    counts, pct,
+    title="Evaluation note (0–10) by Decision AI — Grouped bars",
+    xlabel="Evaluation note",
+    ylabel="Count",
+    group_labels={0: "Sans AI", 1: "Avec AI"},
+    colors=["steelblue", "orange"],
+    show_count=True,
+    show_pct=True
+)
 
 
-bins_p     = [-0.1, 0, 1, 2, 3, 5, 8, 14, 10**9]
-labels_p   = ["0","1","2","3-4","5-7","8-13","14","14+"]
-evalnote_by_countbin_plot(df, "evaluate_note", "Nbr_ticket_pieces", bins_p, labels_p)
+counts, pct = make_grouped_dist(
+    df,
+    x_col="evaluate_note",
+    group_col="dossier_complet",
+    x_order=range(0, 11),
+    group_order=[0, 1],
+    normalize="x"
+)
+
+plot_grouped_bars(
+    counts, pct,
+    title="Evaluation note (0–10) by Dossier complet — Grouped bars",
+    xlabel="Evaluation note",
+    ylabel="Count",
+    group_labels={0: "Non complet", 1: "Complet"},
+    colors=["slategray", "seagreen"],
+    show_count=True,
+    show_pct=True
+)
 
 
-bins_i     = [-0.1, 0, 1, 2, 3, 5, 10, 20, 35, 10**9]
-labels_i   = ["0","1","2","3-4","5-9","10-19","20-34","35","35+"]
-evalnote_by_countbin_plot(df, "evaluate_note", "Nbr_ticket_information", bins_i, labels_i)
+counts, pct = make_grouped_dist(
+    df,
+    x_col="evaluate_note",
+    group_col="nombre_prestation_ko",
+    x_order=range(0, 11),
+    group_order=range(0, 6),
+    normalize="x"
+)
+
+plot_grouped_bars(
+    counts, pct,
+    title="Evaluation note (0–10) by Nombre prestation KO (0–5) — Grouped bars",
+    xlabel="Evaluation note",
+    ylabel="Count",
+    colors=["green", "lightgreen", "yellow", "orange", "red", "black"],
+    show_count=True,
+    show_pct=True,
+    rotate_xticks=0
+)
+
+
 
 
 ```
