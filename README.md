@@ -1,138 +1,113 @@
 ```
-
 import pandas as pd
 import numpy as np
+
+def grouped_distribution_table(
+    df,
+    target_col,         # e.g. "evaluate_note"
+    group_col,          # e.g. "decision_ai"
+    normalize="group",  # "group" => % inside each group, "all" => % of total dataset
+    top_n=None,         # keep top categories of target_col (optional)
+    other_label="Other",
+    include_na=False
+):
+    d = df[[target_col, group_col]].copy()
+
+    if not include_na:
+        d = d.dropna(subset=[target_col, group_col])
+
+    # counts: rows=target, cols=group
+    counts = (
+        d.groupby([target_col, group_col])
+         .size()
+         .unstack(fill_value=0)
+    )
+
+    # optional: keep top_n target values
+    if top_n is not None and len(counts) > top_n:
+        top_idx = counts.sum(axis=1).sort_values(ascending=False).head(top_n).index
+        other_row = counts.drop(index=top_idx).sum(axis=0)
+        counts = counts.loc[top_idx]
+        counts.loc[other_label] = other_row
+
+    # percentages
+    if normalize == "group":
+        pct = (counts.div(counts.sum(axis=0), axis=1) * 100).round(2)  # % within each group column
+    elif normalize == "all":
+        pct = (counts / counts.to_numpy().sum() * 100).round(2)        # % of whole dataset
+    else:
+        raise ValueError("normalize must be 'group' or 'all'")
+
+    # combined table "count (xx.xx%)"
+    combined = counts.astype(int).astype(str) + " (" + pct.astype(str) + "%)"
+
+    return counts, pct, combined
+
+
+```
+
+
+```
 import matplotlib.pyplot as plt
 
-def plot_distribution(
-    df,
-    col,
-    title=None,
-    top_n=15,
-    include_na=False,
-    as_percent=False,
-    sort="auto",           # "auto" | "index" | "count"
-    other_label="Other",
-    cmap_name="tab20",
-    grid=True
+def plot_grouped_distribution(
+    pct_table,          # table from grouped_distribution_table (pct)
+    title="Grouped distribution",
+    xlabel=None,
+    ylabel="Percentage (%)",
+    cmap_name="Set2",
+    grid=True,
+    figsize=(12, 6),
+    legend_title=None
 ):
-    s = df[col]
+    # pct_table: rows=target values, cols=groups
+    ax = pct_table.plot(kind="bar", stacked=True, figsize=figsize, colormap=cmap_name, edgecolor="black", linewidth=0.3)
 
-    # value counts
-    vc = s.value_counts(dropna=not include_na)
+    plt.title(title, fontsize=14, fontweight="bold")
+    plt.xlabel(xlabel if xlabel else pct_table.index.name if pct_table.index.name else "")
+    plt.ylabel(ylabel)
 
-    # sorting
-    if sort == "auto":
-        is_numeric = pd.api.types.is_numeric_dtype(s)
-        if is_numeric and vc.index.nunique() <= 30:
-            vc = vc.sort_index()
-        else:
-            vc = vc.sort_values(ascending=False)
-    elif sort == "index":
-        vc = vc.sort_index()
-    elif sort == "count":
-        vc = vc.sort_values(ascending=False)
+    if grid:
+        plt.grid(axis="y", linestyle="--", alpha=0.35)
 
-    # top N + other
-    if top_n is not None and len(vc) > top_n:
-        top = vc.iloc[:top_n]
-        other = vc.iloc[top_n:].sum()
-        vc = pd.concat([top, pd.Series({other_label: other})])
-
-    labels = vc.index.astype(str)
-    counts = vc.values
-    total = counts.sum()
-    pct = (counts / total * 100) if total > 0 else np.zeros_like(counts, dtype=float)
-
-    y = pct if as_percent else counts
-    ylabel = "Percentage (%)" if as_percent else "Count"
-
-    # --- Adaptive sizing ---
-    n = len(vc)
-    max_label_len = max((len(x) for x in labels), default=1)
-
-    # If many categories OR long labels => horizontal plot
-    horizontal = (n >= 8) or (max_label_len >= 12)
-
-    if horizontal:
-        width = 10
-        height = max(4, min(0.5 * n + 1.5, 14))   # grows with number of categories
-    else:
-        width = max(8, min(0.6 * n + 5, 14))
-        height = 5
-
-    plt.figure(figsize=(width, height))
-
-    # Color palette
-    cmap = plt.get_cmap(cmap_name)
-    colors = [cmap(i / max(n - 1, 1)) for i in range(n)]
-
-    # --- Plot ---
-    if horizontal:
-        bars = plt.barh(labels, y, color=colors, edgecolor="black", linewidth=0.3)
-        plt.xlabel(ylabel)
-        plt.ylabel(col)
-
-        # Grid
-        if grid:
-            plt.grid(axis="x", linestyle="--", alpha=0.35)
-
-        # Labels on bars
-        x_pad = 0.01 * (max(y) if len(y) else 1)
-        for i, b in enumerate(bars):
-            val = b.get_width()
-            txt = f"{counts[i]} ({pct[i]:.2f}%)"
-            plt.text(val + x_pad, b.get_y() + b.get_height()/2, txt,
-                     va="center", fontsize=9)
-
-    else:
-        bars = plt.bar(labels, y, color=colors, edgecolor="black", linewidth=0.3)
-        plt.ylabel(ylabel)
-        plt.xlabel(col)
-
-        # Grid
-        if grid:
-            plt.grid(axis="y", linestyle="--", alpha=0.35)
-
-        # Rotate x labels only if needed
-        if max_label_len >= 6:
-            plt.xticks(rotation=30, ha="right")
-
-        # Labels on bars
-        y_pad = 0.01 * (max(y) if len(y) else 1)
-        for i, b in enumerate(bars):
-            val = b.get_height()
-            txt = f"{counts[i]}\n({pct[i]:.2f}%)"
-            plt.text(b.get_x() + b.get_width()/2, val + y_pad, txt,
-                     ha="center", va="bottom", fontsize=9)
-
-    plot_title = title if title else f"Distribution of {col}"
-    plt.title(plot_title, fontsize=14, fontweight="bold")
-
+    plt.legend(title=legend_title, bbox_to_anchor=(1.02, 1), loc="upper left")
     plt.tight_layout()
     plt.show()
 
 
 ```
-```
-plot_distribution(df, "evaluate_note", title="Distribution: evaluate_note (0–10)", sort="index", top_n=None, cmap_name="Set2")
-plot_distribution(df, "PARCOURS_FINAL", title="Distribution: PARCOURS_FINAL", top_n=10, sort="count", cmap_name="tab20")
-plot_distribution(df, "decision_ai", title="Distribution: Decision AI", sort="index", top_n=None, cmap_name="Set2")
 
 ```
+counts, pct, combined = grouped_distribution_table(
+    df,
+    target_col="evaluate_note",
+    group_col="decision_ai",
+    normalize="group"   # % inside decision_ai groups
+)
 
-```
-plot_distribution(df, "evaluate_note", title="Distribution: evaluate_note (0–10)", sort="index", top_n=None)
-plot_distribution(df, "decision_ai", title="Distribution: Decision AI", sort="index", top_n=None)
+
+from tabulate import tabulate
+
+table = combined.reset_index().rename(columns={"evaluate_note": "Evaluation note"})
+print(tabulate(table, headers="keys", tablefmt="fancy_grid", showindex=False))
 
 
-plot_distribution(df, "evaluate_note", cmap_name="Set2")
-plot_distribution(df, "PARCOURS_FINAL", cmap_name="Dark2")
-plot_distribution(df, "PARCOURS_FINAL", cmap_name="viridis")
+plot_grouped_distribution(
+    pct,
+    title="Distribution of evaluate_note by decision_ai",
+    xlabel="Evaluation note (0–10)",
+    legend_title="decision_ai",
+    cmap_name="Set2"
+)
 
-cols_to_plot = ["evaluate_note", "decision_ai", "dossier_complet", "Nbr_ticket_pieces", "Nbr_ticket_information"]
 
-for c in cols_to_plot:
-    plot_distribution(df, c, top_n=12)
+# evaluate_note by dossier_complet
+counts, pct, combined = grouped_distribution_table(df, "evaluate_note", "dossier_complet")
+plot_grouped_distribution(pct, title="evaluate_note by dossier_complet", legend_title="dossier_complet")
+
+# evaluate_note by PARCOURS_FINAL (many categories -> maybe limit groups first or limit target)
+counts, pct, combined = grouped_distribution_table(df, "evaluate_note", "PARCOURS_FINAL")
+plot_grouped_distribution(pct, title="evaluate_note by PARCOURS_FINAL", legend_title="PARCOURS_FINAL")
+
 
 ```
