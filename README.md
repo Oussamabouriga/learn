@@ -2,72 +2,93 @@
 import numpy as np
 import matplotlib.pyplot as plt
 
-# --- INPUTS (already in your notebook) ---
-# cozzzunts      -> counts (rows=KO 0..5, cols=evaluate_note 0..10)
-# cozzzunts_pct  -> percentages (same shape)
-
+# Use your tables
 counts = cozzzunts.copy()
 pct = cozzzunts_pct.copy()
 
-# Ensure same order
-counts = counts.sort_index().sort_index(axis=1)
-pct = pct.reindex(index=counts.index, columns=counts.columns)
+# Force correct ranges: KO 0..5, note 0..10
+counts = counts.reindex(index=range(0, 6), columns=range(0, 11), fill_value=0)
+pct    = pct.reindex(index=range(0, 6), columns=range(0, 11), fill_value=0)
 
-# For grouped bars: x-axis = evaluate_note, bars = KO
-counts_T = counts.T   # rows=note, cols=KO
-pct_T = pct.T         # rows=note, cols=KO
+# For plotting: x = notes
+notes = list(range(0, 11))
+kos   = list(range(0, 6))
 
-notes = counts_T.index.to_list()
-kos = counts_T.columns.to_list()
+# transpose so rows=notes, cols=KO
+pct_T = pct.T
+cnt_T = counts.T
 
-counts_arr = counts_T.to_numpy()
-pct_arr = pct_T.to_numpy()
+fig, ax = plt.subplots(figsize=(14, 6))
 
-# Colors (change if you want)
+bottom = np.zeros(len(notes))
+
 colors = ["green", "lightgreen", "gold", "orange", "red", "black"]
 
-x = np.arange(len(notes))
-n_ko = len(kos)
-bar_w = 0.12
-offsets = (np.arange(n_ko) - (n_ko - 1) / 2) * bar_w
-
-# Adaptive size (depends on number of notes)
-fig_w = max(12, len(notes) * 1.2)
-fig, ax = plt.subplots(figsize=(fig_w, 6))
-
 for j, ko in enumerate(kos):
+    vals = pct_T[ko].to_numpy()
+
     bars = ax.bar(
-        x + offsets[j],
-        counts_arr[:, j],                 # bar HEIGHT = COUNT
-        width=bar_w,
+        notes, vals,
+        bottom=bottom,
         label=f"KO={ko}",
-        color=colors[j % len(colors)],
-        edgecolor="black",
-        linewidth=0.3
+        color=colors[j],
+        edgecolor="white",
+        linewidth=0.5
     )
 
-    # Labels: "count (xx.x%)"
+    # Put text only if segment is big enough (avoids clutter)
     for i, b in enumerate(bars):
-        c = int(counts_arr[i, j])
-        p = float(pct_arr[i, j])
-        if c > 0:
+        p = vals[i]
+        if p >= 6:  # show label only if >= 6%
+            c = int(cnt_T.iloc[i, j])
             ax.text(
                 b.get_x() + b.get_width()/2,
-                b.get_height(),
-                f"{c}\n({p:.2f}%)",
-                ha="center",
-                va="bottom",
-                fontsize=8
+                bottom[i] + p/2,
+                f"{p:.1f}%\n({c})",
+                ha="center", va="center",
+                fontsize=8, color="black"
             )
 
-ax.set_title("Nombre KO par Evaluation Note (grouped bars) — counts + %")
-ax.set_xlabel("Evaluation note")
-ax.set_ylabel("Count")
-ax.set_xticks(x)
-ax.set_xticklabels(notes)
+    bottom += vals
 
+ax.set_title("Distribution de KO par Evaluation Note (100% stacked) — % + (count)")
+ax.set_xlabel("Evaluation note (0–10)")
+ax.set_ylabel("Percentage (%)")
+ax.set_xticks(notes)
+ax.set_ylim(0, 100)
 ax.grid(axis="y", linestyle="--", alpha=0.35)
 ax.legend(bbox_to_anchor=(1.02, 1), loc="upper left")
+plt.tight_layout()
+plt.show()
+
+
+
+import numpy as np
+import matplotlib.pyplot as plt
+
+pct = cozzzunts_pct.copy().reindex(index=range(0, 6), columns=range(0, 11), fill_value=0)
+
+fig, ax = plt.subplots(figsize=(12, 5))
+
+im = ax.imshow(pct.to_numpy(), aspect="auto")
+
+ax.set_title("Heatmap: % KO par Evaluation Note")
+ax.set_xlabel("Evaluation note (0–10)")
+ax.set_ylabel("Nombre KO (0–5)")
+
+ax.set_xticks(np.arange(11))
+ax.set_xticklabels(range(0, 11))
+ax.set_yticks(np.arange(6))
+ax.set_yticklabels(range(0, 6))
+
+# Write the % inside each cell (only if > 0.5% to avoid clutter)
+for r in range(6):
+    for c in range(11):
+        v = pct.iloc[r, c]
+        if v >= 0.5:
+            ax.text(c, r, f"{v:.1f}%", ha="center", va="center", fontsize=8)
+
+plt.colorbar(im, ax=ax, label="Percentage (%)")
 plt.tight_layout()
 plt.show()
 ```
