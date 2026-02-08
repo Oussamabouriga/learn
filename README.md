@@ -1,16 +1,12 @@
 ```
-def sat_count_by_prog(sat, prog):
+def count_distribution(df, group_col, value_col, value_min=0, value_max=10):
+    values = range(value_min, value_max + 1)
     return (
-        prog.to_frame('prog')
-            .assign(sat=sat)
-            .groupby(['prog', 'sat'])
-            .size()
-            .unstack(fill_value=0)
-            .reindex(columns=range(11), fill_value=0)
+        df.groupby([group_col, value_col])
+          .size()
+          .unstack(fill_value=0)
+          .reindex(columns=values, fill_value=0)
     )
 
-
-table = sat_count_by_prog(df["sat"], df["prog"])
-print(table)
-
+table = count_distribution(df, 'prog', 'sat', 0, 10)
 ```
