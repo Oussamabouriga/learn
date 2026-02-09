@@ -3,269 +3,274 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from sklearn.decomposition import PCA
-from sklearn.preprocessing import StandardScaler
-from sklearn.impute import SimpleImputer
+from sklearn.feature_selection import mutual_info_regression
 
 
 # ============================================================
 # 0) Helpers
 # ============================================================
-def get_numeric_cols(df, target_col):
-    num_cols = df.select_dtypes(include=["number", "int64", "float64", "Int64"]).columns.tolist()
-    num_cols = [c for c in num_cols if c != target_col]
-    return num_cols
+def _to_numeric_safe(s):
+    return pd.to_numeric(s, errors="coerce")
 
 
-def get_categorical_cols(df, target_col):
-    num_cols = df.select_dtypes(include=["number", "int64", "float64", "Int64"]).columns.tolist()
-    cat_cols = [c for c in df.columns if c not in num_cols and c != target_col]
-    return cat_cols
+def _is_numeric(s):
+    return pd.api.types.is_numeric_dtype(s)
 
 
-def missing_report(df, cols):
-    rep = pd.DataFrame({
-        "n_total": len(df),
-        "n_nan": [int(df[c].isna().sum()) for c in cols],
-    }, index=cols)
-    rep["pct_nan"] = 100 * rep["n_nan"] / rep["n_total"]
-    return rep.sort_values("pct_nan", ascending=False)
+def _mask_xy(x, y):
+    y = _to_numeric_safe(y)
+    mask = x.notna() & y.notna()
+    return x[mask], y[mask]
 
 
-# ============================================================
-# 1) Prepare matrices for PCA
-#    PCA needs numeric matrix -> we impute + scale
-# ============================================================
-def prepare_numeric_matrix(df, target_col):
-    """
-    Returns:
-      X_scaled (np.array), feature_names (list), y (Series)
-    """
-    y = pd.to_numeric(df[target_col], errors="coerce")
-    num_cols = get_numeric_cols(df, target_col)
-
-    X = df[num_cols].copy()
-    # keep rows where target exists
-    mask = y.notna()
-    X = X.loc[mask]
-    y = y.loc[mask]
-
-    # impute numeric
-    imp = SimpleImputer(strategy="median")
-    X_imp = imp.fit_transform(X)
-
-    # scale
-    scaler = StandardScaler()
-    X_scaled = scaler.fit_transform(X_imp)
-
-    return X_scaled, num_cols, y
-
-
-def onehot_encode_top_levels(series, min_count=20, top_k=None):
-    """
-    One-hot encode a categorical series but keep only:
-      - levels with count >= min_count
-      - optionally only top_k most frequent levels
-    """
-    s = series.astype("string").fillna("MISSING")
-    vc = s.value_counts()
-
-    keep = vc[vc >= min_count].index
-    if top_k is not None:
-        keep = vc.head(top_k).index.intersection(keep)
-
-    s2 = s.where(s.isin(keep), other="OTHER")
-    d = pd.get_dummies(s2, prefix=series.name, drop_first=False)
-    return d
-
-
-def prepare_mixed_matrix_onehot(df, target_col, cat_cols, min_count=20, top_k=None):
-    """
-    Mixed PCA approach (PCA on numeric + one-hot categoricals).
-    Returns:
-      X_scaled, feature_names, y
-    """
-    y = pd.to_numeric(df[target_col], errors="coerce")
-    mask = y.notna()
-    y = y.loc[mask]
-
-    # numeric part
-    num_cols = get_numeric_cols(df, target_col)
-    X_num = df.loc[mask, num_cols].copy()
-    X_num_imp = SimpleImputer(strategy="median").fit_transform(X_num)
-
-    # categorical part (one-hot but controlled)
-    onehots = []
-    for c in cat_cols:
-        d = onehot_encode_top_levels(df.loc[mask, c], min_count=min_count, top_k=top_k)
-        onehots.append(d)
-
-    X_cat = pd.concat(onehots, axis=1) if onehots else pd.DataFrame(index=X_num.index)
-
-    # combine
-    X_all = np.concatenate([X_num_imp, X_cat.values], axis=1)
-    feature_names = num_cols + X_cat.columns.tolist()
-
-    # scale
-    X_scaled = StandardScaler().fit_transform(X_all)
-
-    return X_scaled, feature_names, y
+def _mi_regression_1d(X_2d, y_1d, discrete_features, random_state=42):
+    mi = mutual_info_regression(
+        X_2d, y_1d,
+        discrete_features=discrete_features,
+        random_state=random_state
+    )
+    return float(mi[0])
 
 
 # ============================================================
-# 2) Run PCA + extract explained variance + scores + loadings
+# 1) MI for ONE COLUMN + full missingness stats (PRO)
 # ============================================================
-def run_pca(X_scaled, feature_names, n_components=5):
-    """
-    Returns:
-      pca (model), scores (DataFrame), loadings (DataFrame), explained_variance_ratio (array)
-    """
-    pca = PCA(n_components=n_components, random_state=0)
-    Z = pca.fit_transform(X_scaled)
+def mi_column_with_stats(df, col, target_col, random_state=42):
+    n_total = len(df)
 
-    scores = pd.DataFrame(Z, columns=[f"PC{i+1}" for i in range(Z.shape[1])])
+    x_raw = df[col]
+    y_raw = df[target_col]
 
-    # loadings: contribution of each original feature to each PC
-    loadings = pd.DataFrame(
-        pca.components_.T,
-        index=feature_names,
-        columns=[f"PC{i+1}" for i in range(pca.n_components_)]
+    # Missingness (for x only)
+    n_nan_x = int(x_raw.isna().sum())
+    pct_nan_x = (n_nan_x / n_total) * 100 if n_total else np.nan
+
+    # Used rows (need x and y present)
+    x, y = _mask_xy(x_raw, y_raw)
+    n_used = int(len(x))
+
+    # If not enough usable rows, MI is not reliable
+    if n_used < 30:
+        return {
+            "feature": col,
+            "type": "numeric" if _is_numeric(x_raw) else "categorical",
+            "mi": np.nan,
+            "mi_norm": np.nan,
+            "n_total": n_total,
+            "n_used": n_used,
+            "n_nan": n_nan_x,
+            "pct_nan": pct_nan_x,
+            "note": "too_few_rows_for_mi(<30)"
+        }
+
+    # Compute MI
+    if _is_numeric(x_raw):
+        x_num = _to_numeric_safe(x).astype(float)
+        x_num = x_num.fillna(x_num.median())  # safety
+
+        X = x_num.values.reshape(-1, 1)
+        mi = _mi_regression_1d(X, y.values, discrete_features=[False], random_state=random_state)
+        ftype = "numeric"
+    else:
+        x_cat = pd.Categorical(x.astype("string"))
+        codes = x_cat.codes.reshape(-1, 1)
+        mi = _mi_regression_1d(codes, y.values, discrete_features=[True], random_state=random_state)
+        ftype = "categorical"
+
+    return {
+        "feature": col,
+        "type": ftype,
+        "mi": float(mi),
+        "mi_norm": np.nan,
+        "n_total": n_total,
+        "n_used": n_used,
+        "n_nan": n_nan_x,
+        "pct_nan": pct_nan_x,
+        "note": ""
+    }
+
+
+# ============================================================
+# 2) MI for ALL columns (COLUMN LEVEL, FAIR) + stats
+# ============================================================
+def mi_all_columns_with_stats(df, target_col, numeric_cols, categorical_cols, random_state=42):
+    rows = []
+
+    for c in numeric_cols:
+        if c == target_col:
+            continue
+        rows.append(mi_column_with_stats(df, c, target_col, random_state=random_state))
+
+    for c in categorical_cols:
+        rows.append(mi_column_with_stats(df, c, target_col, random_state=random_state))
+
+    out = pd.DataFrame(rows).set_index("feature")
+
+    # Normalize MI for easy comparison (0..1)
+    max_mi = out["mi"].max()
+    out["mi_norm"] = out["mi"] / (max_mi + 1e-12)
+
+    # Extra: quality / reliability flags
+    out["used_pct"] = 100 * out["n_used"] / (out["n_total"] + 1e-12)
+    out["reliability"] = np.where(
+        out["n_used"] < 100, "LOW (few rows)",
+        np.where(out["n_used"] < 300, "MEDIUM", "HIGH")
     )
 
-    return pca, scores, loadings, pca.explained_variance_ratio_
+    # Sort by MI descending
+    out = out.sort_values("mi", ascending=False)
+    return out
 
 
 # ============================================================
-# 3) Plots: explained variance, PC scatter, PC-target correlation
+# 3) Plots (more plots for better understanding)
 # ============================================================
-def plot_explained_variance(ev_ratio, title="PCA explained variance"):
-    x = np.arange(1, len(ev_ratio) + 1)
-    plt.figure(figsize=(7, 4))
-    plt.plot(x, ev_ratio, marker="o")
-    plt.xlabel("Principal Component")
-    plt.ylabel("Explained variance ratio")
+def plot_top_mi_columns(mi_df, top_n=15, title="Top MI (column-level, fair)"):
+    top = mi_df.head(top_n).sort_values("mi")
+    plt.figure(figsize=(10, 6))
+    plt.barh(top.index.astype(str), top["mi"])
+    plt.xlabel("Mutual Information (higher = more informative)")
     plt.title(title)
-    plt.xticks(x)
-    plt.tight_layout()
-    plt.show()
-
-    plt.figure(figsize=(7, 4))
-    plt.plot(x, np.cumsum(ev_ratio), marker="o")
-    plt.xlabel("Principal Component")
-    plt.ylabel("Cumulative explained variance")
-    plt.title(title + " (cumulative)")
-    plt.xticks(x)
     plt.tight_layout()
     plt.show()
 
 
-def plot_pc_scatter(scores, y, title="PC1 vs PC2 colored by target"):
-    if "PC1" not in scores.columns or "PC2" not in scores.columns:
-        print("Need at least 2 components for PC1 vs PC2 scatter.")
+def plot_missingness_bar(mi_df, top_n=30, title="Missingness (% NaN) for top features"):
+    """
+    Shows %NaN for the same top features (by MI) so you can judge reliability.
+    """
+    top = mi_df.head(top_n).copy()
+    top = top.sort_values("pct_nan")
+    plt.figure(figsize=(10, 6))
+    plt.barh(top.index.astype(str), top["pct_nan"])
+    plt.xlabel("% NaN in feature")
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_used_rows_bar(mi_df, top_n=30, title="Used rows (%) for MI computation"):
+    """
+    Shows how much data was actually used for MI (n_used / n_total).
+    """
+    top = mi_df.head(top_n).copy()
+    top = top.sort_values("used_pct")
+    plt.figure(figsize=(10, 6))
+    plt.barh(top.index.astype(str), top["used_pct"])
+    plt.xlabel("% rows used (feature & target not NaN)")
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_mi_vs_missingness(mi_df, title="MI vs Missingness (%NaN)"):
+    """
+    Scatter: each point is a feature.
+    Helps spot features with high MI but huge missingness (danger).
+    """
+    tmp = mi_df.dropna(subset=["mi"]).copy()
+    plt.figure(figsize=(6, 5))
+    plt.scatter(tmp["pct_nan"], tmp["mi"], s=20)
+    plt.xlabel("% NaN in feature")
+    plt.ylabel("MI")
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_mi_vs_n_used(mi_df, title="MI vs n_used (how much data supported it)"):
+    """
+    Scatter: MI vs n_used to see if a feature looks important just from few rows.
+    """
+    tmp = mi_df.dropna(subset=["mi"]).copy()
+    plt.figure(figsize=(6, 5))
+    plt.scatter(tmp["n_used"], tmp["mi"], s=20)
+    plt.xlabel("n_used (rows used to compute MI)")
+    plt.ylabel("MI")
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+# ============================================================
+# 4) Quick report for specific columns (delays)
+# ============================================================
+def report_columns(mi_df, cols):
+    cols = [c for c in cols if c in mi_df.index]
+    if not cols:
+        print("None of the requested columns exist in the MI table.")
+        return
+    display_cols = ["type", "mi", "mi_norm", "n_used", "used_pct", "n_nan", "pct_nan", "reliability", "note"]
+    print("\n=== Requested columns MI + missingness ===\n")
+    print(mi_df.loc[cols, display_cols].sort_values("mi", ascending=False))
+
+
+def plot_focus_delays(mi_df, cols, title_prefix="[Delays]"):
+    """
+    Two small plots:
+      - MI of delays
+      - Missingness of delays
+    """
+    cols = [c for c in cols if c in mi_df.index]
+    if not cols:
+        print("No delay columns found in MI table.")
         return
 
-    plt.figure(figsize=(6, 5))
-    sc = plt.scatter(scores["PC1"], scores["PC2"], c=y.values, s=20)
-    plt.xlabel("PC1")
-    plt.ylabel("PC2")
-    plt.title(title)
-    plt.colorbar(sc, label="evaluate_note")
+    d = mi_df.loc[cols].copy()
+
+    # MI plot
+    d1 = d.sort_values("mi")
+    plt.figure(figsize=(8, 4))
+    plt.barh(d1.index.astype(str), d1["mi"])
+    plt.xlabel("MI")
+    plt.title(f"{title_prefix} MI with target")
     plt.tight_layout()
     plt.show()
 
-
-def pc_target_correlations(scores, y, method="spearman"):
-    """
-    Correlate each PC with target to find which components relate to the note.
-    """
-    tmp = scores.copy()
-    tmp["target"] = y.values
-    corr = tmp.corr(method=method)["target"].drop("target")
-    out = pd.DataFrame({"corr": corr, "abs_corr": corr.abs()}).sort_values("abs_corr", ascending=False)
-    return out
-
-
-def plot_pc_target_corr(pc_corr_df, title="Correlation between PCs and target"):
-    d = pc_corr_df.sort_values("corr")
-    plt.figure(figsize=(7, 4))
-    plt.barh(d.index.astype(str), d["corr"])
-    plt.xlabel("correlation")
-    plt.title(title)
+    # Missingness plot
+    d2 = d.sort_values("pct_nan")
+    plt.figure(figsize=(8, 4))
+    plt.barh(d2.index.astype(str), d2["pct_nan"])
+    plt.xlabel("% NaN")
+    plt.title(f"{title_prefix} Missingness (%NaN)")
     plt.tight_layout()
     plt.show()
 
 
 # ============================================================
-# 4) Explain "what affects note" using PCA loadings
-#    -> pick PCs most correlated with target, then show top loadings
-# ============================================================
-def top_loadings_for_pc(loadings, pc_name="PC1", top_n=15):
-    s = loadings[pc_name].copy()
-    out = pd.DataFrame({"loading": s, "abs_loading": s.abs()}).sort_values("abs_loading", ascending=False).head(top_n)
-    return out
-
-
-def summarize_key_drivers(loadings, pc_corr_df, top_pcs=2, top_features=12):
-    """
-    Returns a dict: for the most target-related PCs, the strongest contributing features.
-    """
-    result = {}
-    pcs = pc_corr_df.head(top_pcs).index.tolist()
-    for pc in pcs:
-        result[pc] = top_loadings_for_pc(loadings, pc, top_n=top_features)
-    return result
-
-
-# ============================================================
-# =================== CALL EVERYTHING (END) ===================
+# =================== CALL ALL (END) =========================
 # ============================================================
 
 TARGET_COL = "evaluate_note"
 
-# ---- (A) PCA on NUMERIC ONLY ----
-X_num, num_features, y = prepare_numeric_matrix(df, TARGET_COL)
+CATEGORICAL_COLS = ["PARCOURS_FINAL", "PARCOURS_INITIAL", "list_prest"]  # add more if needed
+NUMERIC_COLS = df.select_dtypes(include=["number", "int64", "float64", "Int64"]).columns.tolist()
 
-pca_num, scores_num, loadings_num, ev_num = run_pca(X_num, num_features, n_components=5)
+# 1) Compute MI table with missingness stats
+mi_cols = mi_all_columns_with_stats(
+    df=df,
+    target_col=TARGET_COL,
+    numeric_cols=NUMERIC_COLS,
+    categorical_cols=CATEGORICAL_COLS,
+    random_state=42
+)
 
-plot_explained_variance(ev_num, title="[NUMERIC PCA] explained variance")
-plot_pc_scatter(scores_num, y, title="[NUMERIC PCA] PC1 vs PC2 (colored by evaluate_note)")
+print("\n=== Column-level MI (FAIR) + missingness stats (top 30) ===\n")
+print(mi_cols.head(30)[["type", "mi", "mi_norm", "n_used", "used_pct", "n_nan", "pct_nan", "reliability", "note"]])
 
-pc_corr_num = pc_target_correlations(scores_num, y, method="spearman")
-print("\n[NUMERIC PCA] PC-target correlations:\n", pc_corr_num)
-plot_pc_target_corr(pc_corr_num, title="[NUMERIC PCA] PCs correlation with evaluate_note")
+# 2) Plot top MI columns
+plot_top_mi_columns(mi_cols, top_n=15, title="[MI] Top columns (fair) with evaluate_note")
 
-drivers_num = summarize_key_drivers(loadings_num, pc_corr_num, top_pcs=2, top_features=12)
-print("\n[NUMERIC PCA] Key drivers for target-related PCs:")
-for pc, table in drivers_num.items():
-    print(f"\n--- {pc} (most related to target) top loadings ---\n{table}")
+# 3) New plots to understand reliability / imbalance
+plot_missingness_bar(mi_cols, top_n=30, title="[MI] %NaN for Top 30 MI features")
+plot_used_rows_bar(mi_cols, top_n=30, title="[MI] %Rows used for Top 30 MI features")
+plot_mi_vs_missingness(mi_cols, title="[MI] MI vs %NaN (watch for high MI but too missing)")
+plot_mi_vs_n_used(mi_cols, title="[MI] MI vs n_used (watch for high MI with low support)")
 
-
-# ---- (B) PCA on MIXED DATA (numeric + categorical via controlled one-hot) ----
-CAT_COLS = ["PARCOURS_FINAL", "PARCOURS_INITIAL", "list_prest"]  # adjust/add
-# Control rare categories to avoid noise/explosion:
-MIN_COUNT = 20   # filter rare levels
-TOP_K_LEVELS = None  # or put 30 to keep only top 30 levels per categorical column
-
-X_mix, mix_features, y2 = prepare_mixed_matrix_onehot(df, TARGET_COL, CAT_COLS, min_count=MIN_COUNT, top_k=TOP_K_LEVELS)
-
-pca_mix, scores_mix, loadings_mix, ev_mix = run_pca(X_mix, mix_features, n_components=5)
-
-plot_explained_variance(ev_mix, title="[MIXED PCA] explained variance (numeric + one-hot)")
-plot_pc_scatter(scores_mix, y2, title="[MIXED PCA] PC1 vs PC2 (colored by evaluate_note)")
-
-pc_corr_mix = pc_target_correlations(scores_mix, y2, method="spearman")
-print("\n[MIXED PCA] PC-target correlations:\n", pc_corr_mix)
-plot_pc_target_corr(pc_corr_mix, title="[MIXED PCA] PCs correlation with evaluate_note")
-
-drivers_mix = summarize_key_drivers(loadings_mix, pc_corr_mix, top_pcs=2, top_features=15)
-print("\n[MIXED PCA] Key drivers for target-related PCs:")
-for pc, table in drivers_mix.items():
-    print(f"\n--- {pc} (most related to target) top loadings ---\n{table}")
+# 4) Focus report: delays you mentioned
+DELAY_FOCUS = ["delai_reparation", "delai_indemnisation", "delai_de_completude"]
+report_columns(mi_cols, DELAY_FOCUS)
+plot_focus_delays(mi_cols, DELAY_FOCUS, title_prefix="[Delays Focus]")
 
 
-# ---- (C) Optional: Missingness report for your key delay cols ----
-FOCUS_COLS = ["delai_reparation", "delai_indemnisation", "delai_de_completude"]
-exists = [c for c in FOCUS_COLS if c in df.columns]
-if exists:
-    print("\n[Missingness report] for key delay columns:\n", missing_report(df, exists))
 ```
