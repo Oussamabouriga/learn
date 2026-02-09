@@ -5,227 +5,199 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from sklearn.feature_selection import mutual_info_regression
-from sklearn.preprocessing import KBinsDiscretizer
 
 
 # ============================================================
-# Helpers: build X (features) and y (target) for MI
+# 1) Mutual Information (MI) pour UNE feature (num OU cat)
+#    - si cat: on encode en codes + discrete_features=True
 # ============================================================
-def build_mi_dataset(df, target_col):
-    """
-    Returns:
-      X_enc: One-hot encoded + numeric, NaNs filled (median for numeric, "MISSING" for cats)
-      y: target as numeric
-    """
+def mi_single_feature(df, feature_col, target_col, random_state=42):
+    x = df[feature_col]
     y = df[target_col].astype(float)
 
-    X = df.drop(columns=[target_col]).copy()
+    mask = y.notna() & x.notna()
+    x = x[mask]
+    y = y[mask]
 
-    # split numeric / categorical
-    num_cols = X.select_dtypes(include=["number", "int64", "float64", "Int64"]).columns.tolist()
-    cat_cols = [c for c in X.columns if c not in num_cols]
+    # numeric ?
+    if pd.api.types.is_numeric_dtype(x):
+        X = x.astype(float).values.reshape(-1, 1)
+        mi = mutual_info_regression(X, y.values, discrete_features=[False], random_state=random_state)[0]
+        return float(mi)
 
-    # Fill missing
-    for c in num_cols:
-        X[c] = X[c].astype(float)
-        X[c] = X[c].fillna(X[c].median())
-
-    for c in cat_cols:
-        X[c] = X[c].astype("string").fillna("MISSING")
-
-    # One-hot for categoricals
-    X_enc = pd.get_dummies(X, columns=cat_cols, drop_first=False)
-
-    # keep only rows where target is not NaN
-    mask = y.notna()
-    return X_enc.loc[mask], y.loc[mask]
+    # categorical -> codes
+    x_cat = pd.Categorical(x.astype("string"))
+    X = x_cat.codes.reshape(-1, 1)  # -1 possible if missing; but we filtered notna above
+    mi = mutual_info_regression(X, y.values, discrete_features=[True], random_state=random_state)[0]
+    return float(mi)
 
 
 # ============================================================
-# 1) Mutual Information for each feature with the target
+# 2) Eta Squared (η²) pour cat -> target numeric
+#    Interprétation: part de variance de target expliquée par la catégorie
 # ============================================================
-def mi_with_target(df, target_col, random_state=42):
-    """
-    Computes mutual information (MI) for each feature in df against target_col.
-    Returns a sorted DataFrame: mi, normalized_mi
-    """
-    X_enc, y = build_mi_dataset(df, target_col)
+def eta_squared(df, cat_col, target_col):
+    x = df[cat_col].astype("string")
+    y = df[target_col].astype(float)
 
-    # MI for regression-style target (evaluate_note is numeric 0..10)
-    mi = mutual_info_regression(X_enc.values, y.values, random_state=random_state)
+    mask = x.notna() & y.notna()
+    x = x[mask]
+    y = y[mask]
 
-    mi_df = pd.DataFrame({"feature": X_enc.columns, "mi": mi})
-    mi_df["mi_norm"] = mi_df["mi"] / (mi_df["mi"].max() + 1e-12)
-    mi_df = mi_df.sort_values("mi", ascending=False).set_index("feature")
-    return mi_df
+    # moyenne globale
+    y_mean = y.mean()
 
+    # somme des carrés totale
+    sst = ((y - y_mean) ** 2).sum()
+    if sst == 0:
+        return 0.0
 
-# ============================================================
-# 2) Bar plot of top MI features
-# ============================================================
-def plot_top_mi(mi_df, top_n=20, title="Top Mutual Information with target"):
-    top = mi_df.head(top_n).sort_values("mi")
-    plt.figure(figsize=(10, 6))
-    plt.barh(top.index.astype(str), top["mi"])
-    plt.xlabel("Mutual Information (higher = more informative)")
-    plt.title(title)
-    plt.tight_layout()
-    plt.show()
+    # somme des carrés "between groups"
+    ssb = 0.0
+    for lvl, y_grp in y.groupby(x):
+        ssb += len(y_grp) * (y_grp.mean() - y_mean) ** 2
+
+    return float(ssb / sst)
 
 
 # ============================================================
-# 3) Compare MI vs Correlation (Spearman) to see overlap
+# 3) Corr Spearman pour numeric -> target numeric
 # ============================================================
-def corr_with_target_encoded(df, target_col, method="spearman"):
-    """
-    Encodes categoricals (one-hot) + keeps numeric; computes correlation with target.
-    Returns a Series indexed by feature.
-    """
-    X_enc, y = build_mi_dataset(df, target_col)
-    tmp = X_enc.copy()
-    tmp[target_col] = y.values
-    corr = tmp.corr(method=method)[target_col].drop(target_col).dropna()
-    return corr
-
-
-def compare_mi_vs_corr(df, target_col, top_n=30, corr_method="spearman"):
-    """
-    Returns a DataFrame containing MI + corr + ranks.
-    Also returns overlap list (features in both top lists).
-    """
-    mi_df = mi_with_target(df, target_col)
-    corr_s = corr_with_target_encoded(df, target_col, method=corr_method)
-
-    # align
-    comp = pd.DataFrame({
-        "mi": mi_df["mi"],
-        "corr": corr_s
-    }).dropna()
-
-    comp["abs_corr"] = comp["corr"].abs()
-
-    # top lists
-    top_mi = comp.sort_values("mi", ascending=False).head(top_n).index
-    top_corr = comp.sort_values("abs_corr", ascending=False).head(top_n).index
-    overlap = list(set(top_mi).intersection(set(top_corr)))
-
-    comp["mi_rank"] = comp["mi"].rank(ascending=False, method="dense")
-    comp["corr_rank"] = comp["abs_corr"].rank(ascending=False, method="dense")
-    comp = comp.sort_values(["mi_rank", "corr_rank"])
-
-    return comp, overlap
-
-
-def plot_mi_vs_corr_scatter(comp_df, title="MI vs |Correlation|"):
-    """
-    Scatter plot: each point is a feature.
-    x = |corr|, y = MI
-    """
-    plt.figure(figsize=(6, 5))
-    plt.scatter(comp_df["abs_corr"], comp_df["mi"], s=20)
-    plt.xlabel("|Correlation| (Spearman)")
-    plt.ylabel("Mutual Information")
-    plt.title(title)
-    plt.tight_layout()
-    plt.show()
+def spearman_corr(df, num_col, target_col):
+    tmp = df[[num_col, target_col]].dropna()
+    if tmp.empty:
+        return np.nan
+    return float(tmp.corr(method="spearman").iloc[0, 1])
 
 
 # ============================================================
-# 4) 2D plots for top MI features (easy to understand)
-#    - If feature is binary (0/1): boxplot-like using jitter scatter
-#    - If numeric: scatter plot
+# 4) Table "pro" : importance par COLONNE (pas par one-hot)
+#    - numeric: corr_spearman + mi
+#    - categorical: eta2 + mi
 # ============================================================
-def is_binary_series(s):
-    vals = pd.Series(s).dropna().unique()
-    return len(vals) <= 2 and set(vals).issubset({0, 1})
+def feature_importance_by_column(df, target_col, categorical_cols, numeric_cols, random_state=42):
+    rows = []
 
+    # numeric features
+    for col in numeric_cols:
+        if col == target_col:
+            continue
+        rows.append({
+            "feature": col,
+            "type": "numeric",
+            "spearman_corr": spearman_corr(df, col, target_col),
+            "eta2": np.nan,
+            "mi": mi_single_feature(df, col, target_col, random_state=random_state),
+        })
 
-def plot_top_mi_features_2d(df, target_col, top_n=6, random_state=42):
-    """
-    Picks top MI features (from encoded set) and draws a simple plot per feature.
-    """
-    mi_df = mi_with_target(df, target_col, random_state=random_state)
-    X_enc, y = build_mi_dataset(df, target_col)
+    # categorical features (NO one-hot here)
+    for col in categorical_cols:
+        rows.append({
+            "feature": col,
+            "type": "categorical",
+            "spearman_corr": np.nan,
+            "eta2": eta_squared(df, col, target_col),
+            "mi": mi_single_feature(df, col, target_col, random_state=random_state),
+        })
 
-    top_feats = mi_df.head(top_n).index.tolist()
+    out = pd.DataFrame(rows).set_index("feature")
 
-    for f in top_feats:
-        x = X_enc[f].values
-        yy = y.values
+    # normalisations pour comparaison (0..1)
+    out["mi_norm"] = out["mi"] / (out["mi"].max() + 1e-12)
+    out["eta2_norm"] = out["eta2"] / (out["eta2"].max() + 1e-12)
 
-        plt.figure(figsize=(6, 4))
+    # score global simple (tu peux changer les weights)
+    # - numeric: combine |corr| et MI
+    # - categorical: combine eta2 et MI
+    out["score"] = np.where(
+        out["type"] == "numeric",
+        0.5 * out["mi_norm"] + 0.5 * out["spearman_corr"].abs().fillna(0),
+        0.5 * out["mi_norm"] + 0.5 * out["eta2_norm"].fillna(0)
+    )
 
-        if is_binary_series(x):
-            # jitter scatter for 0/1
-            jitter = (np.random.RandomState(0).rand(len(x)) - 0.5) * 0.08
-            plt.scatter(x + jitter, yy, s=15)
-            plt.xticks([0, 1], [f"{f}=0", f"{f}=1"])
-            plt.xlabel("Binary feature")
-        else:
-            plt.scatter(x, yy, s=15)
-            plt.xlabel(f)
-
-        plt.ylabel(target_col)
-        plt.title(f"2D view: {f} vs {target_col} (high MI)")
-        plt.tight_layout()
-        plt.show()
-
-
-# ============================================================
-# 5) Joint analysis (MI of pairs): see how TWO features together help
-#    Simple approach:
-#      - pick top_k features by MI
-#      - discretize both features into bins
-#      - build a combined "pair" feature
-#      - compute MI(pair, target)
-# ============================================================
-def mi_joint_pairs(df, target_col, top_k=12, bins=6, random_state=42):
-    """
-    Returns MI for feature pairs (top_k features).
-    Uses discretization and a combined pair label to measure joint information.
-    """
-    mi_df = mi_with_target(df, target_col, random_state=random_state)
-    X_enc, y = build_mi_dataset(df, target_col)
-
-    feats = mi_df.head(top_k).index.tolist()
-    X = X_enc[feats].copy()
-
-    # discretize (works for numeric; for one-hot 0/1 it stays basically same)
-    disc = KBinsDiscretizer(n_bins=bins, encode="ordinal", strategy="quantile")
-    Xb = disc.fit_transform(X.values)
-
-    pair_scores = []
-    n = len(feats)
-
-    for i in range(n):
-        for j in range(i + 1, n):
-            a = Xb[:, i].astype(int)
-            b = Xb[:, j].astype(int)
-
-            # combine into one label: a * big + b
-            pair = a * 1000 + b
-
-            # MI between pair and target (treat pair as a discrete feature)
-            # mutual_info_regression can handle discrete-ish numeric, but we help by casting float
-            score = mutual_info_regression(pair.reshape(-1, 1), y.values, random_state=random_state)[0]
-            pair_scores.append((feats[i], feats[j], score))
-
-    out = pd.DataFrame(pair_scores, columns=["feat1", "feat2", "mi_pair"])
-    out["mi_pair_norm"] = out["mi_pair"] / (out["mi_pair"].max() + 1e-12)
-    out = out.sort_values("mi_pair", ascending=False)
+    out = out.sort_values("score", ascending=False)
     return out
 
 
-def plot_top_joint_pairs(joint_df, top_n=15, title="Top joint MI feature pairs"):
-    top = joint_df.head(top_n).copy()
-    labels = (top["feat1"] + " + " + top["feat2"]).tolist()
+# ============================================================
+# 5) Plot : top features (group-level) par score / MI / eta2
+# ============================================================
+def plot_top_features_table(imp_df, top_n=15, title="Top feature groups (column-level)"):
+    top = imp_df.head(top_n).copy()
+    top = top.sort_values("score")  # for horizontal bar
 
     plt.figure(figsize=(10, 6))
-    plt.barh(labels[::-1], top["mi_pair"].values[::-1])
-    plt.xlabel("Mutual Information (pair)")
+    plt.barh(top.index.astype(str), top["score"])
+    plt.xlabel("Score (combined)")
     plt.title(title)
     plt.tight_layout()
     plt.show()
+
+
+def plot_categorical_eta2(imp_df, top_n=15, title="Categorical features: eta² (explained variance)"):
+    cat = imp_df[imp_df["type"] == "categorical"].dropna(subset=["eta2"]).head(top_n).copy()
+    if cat.empty:
+        print("No categorical eta² to plot.")
+        return
+
+    cat = cat.sort_values("eta2")
+    plt.figure(figsize=(10, 6))
+    plt.barh(cat.index.astype(str), cat["eta2"])
+    plt.xlabel("eta² (higher = more variance explained)")
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+def plot_numeric_corr(imp_df, top_n=15, title="Numeric features: Spearman corr with target"):
+    num = imp_df[imp_df["type"] == "numeric"].dropna(subset=["spearman_corr"]).head(top_n).copy()
+    if num.empty:
+        print("No numeric correlation to plot.")
+        return
+
+    num = num.sort_values("spearman_corr")
+    plt.figure(figsize=(10, 6))
+    plt.barh(num.index.astype(str), num["spearman_corr"])
+    plt.xlabel("Spearman correlation")
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+# ============================================================
+# 6) Drill-down PRO pour une colonne catégorielle:
+#    - mean target par modalité + count
+#    - (option) filter rare categories (min_count)
+# ============================================================
+def categorical_drilldown(df, cat_col, target_col, min_count=30, top_levels=20):
+    tmp = df[[cat_col, target_col]].dropna()
+    tmp[cat_col] = tmp[cat_col].astype("string")
+
+    stats = tmp.groupby(cat_col)[target_col].agg(["mean", "median", "count"]).sort_values("count", ascending=False)
+
+    # garder seulement les modalités assez présentes
+    stats_f = stats[stats["count"] >= min_count].copy()
+
+    # si trop de modalités, on garde top par count
+    stats_f = stats_f.head(top_levels).copy()
+
+    # plot mean + count (2 axes)
+    fig, ax1 = plt.subplots(figsize=(10, 5))
+
+    ax1.plot(stats_f.index.astype(str), stats_f["mean"], marker="o")
+    ax1.set_ylabel(f"Mean {target_col}")
+    ax1.set_xlabel(cat_col)
+    ax1.tick_params(axis="x", rotation=90)
+
+    ax2 = ax1.twinx()
+    ax2.bar(stats_f.index.astype(str), stats_f["count"], alpha=0.3)
+    ax2.set_ylabel("Count")
+
+    plt.title(f"{cat_col}: mean {target_col} + sample size (filtered min_count={min_count})")
+    plt.tight_layout()
+    plt.show()
+
+    return stats
 
 
 # ============================================================
@@ -234,25 +206,29 @@ def plot_top_joint_pairs(joint_df, top_n=15, title="Top joint MI feature pairs")
 
 TARGET_COL = "evaluate_note"
 
-# 1) MI for every feature
-mi_df = mi_with_target(df, TARGET_COL)
-print("\n[1] Mutual Information with target (top 30):\n", mi_df.head(30))
+CATEGORICAL_COLS = ["PARCOURS_FINAL", "PARCOURS_INITIAL", "list_prest"]  # ajoute d'autres si besoin
+NUMERIC_COLS = df.select_dtypes(include=["number", "int64", "float64", "Int64"]).columns.tolist()
 
-# 2) Bar plot top MI
-plot_top_mi(mi_df, top_n=20, title="[2] Top MI features with evaluate_note")
+# 1) Importance pro par colonne (pas par one-hot)
+imp = feature_importance_by_column(
+    df=df,
+    target_col=TARGET_COL,
+    categorical_cols=CATEGORICAL_COLS,
+    numeric_cols=NUMERIC_COLS,
+    random_state=42
+)
 
-# 3) Compare MI vs correlation + overlap + scatter
-comp_df, overlap = compare_mi_vs_corr(df, TARGET_COL, top_n=30, corr_method="spearman")
-print("\n[3] MI vs |corr| comparison (top rows):\n", comp_df.head(30))
-print("\n[3] Overlap features (in both top MI and top |corr|):\n", overlap)
-plot_mi_vs_corr_scatter(comp_df, title="[3] MI vs |Correlation| (Spearman)")
+print("\n=== Feature importance (COLUMN LEVEL) ===\n")
+print(imp.head(30))
 
-# 4) 2D plots for top MI features
-plot_top_mi_features_2d(df, TARGET_COL, top_n=6)
+# 2) Plots group-level
+plot_top_features_table(imp, top_n=15, title="Top feature groups (column-level) - combined score")
+plot_numeric_corr(imp, top_n=15, title="Numeric features: Spearman correlation with evaluate_note")
+plot_categorical_eta2(imp, top_n=15, title="Categorical features: eta² (explained variance)")
 
-# 5) Joint analysis (pairs)
-joint_df = mi_joint_pairs(df, TARGET_COL, top_k=12, bins=6)
-print("\n[5] Joint MI pairs (top 20):\n", joint_df.head(20))
-plot_top_joint_pairs(joint_df, top_n=15, title="[5] Top joint MI pairs")
-
+# 3) Drill-down فقط إذا تحب تفهم داخل العمود
+# مثال: PARCOURS_FINAL
+stats_pf = categorical_drilldown(df, "PARCOURS_FINAL", TARGET_COL, min_count=30, top_levels=20)
+# stats_pi = categorical_drilldown(df, "PARCOURS_INITIAL", TARGET_COL, min_count=30, top_levels=20)
+# stats_lp = categorical_drilldown(df, "list_prest", TARGET_COL, min_count=30, top_levels=20)
 ```
