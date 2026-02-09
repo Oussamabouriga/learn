@@ -1,184 +1,229 @@
 ```
+
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from sklearn.feature_selection import mutual_info_regression
+from sklearn.preprocessing import KBinsDiscretizer
+
 
 # ============================================================
-# 0) Generic plotting helpers (SEPARATED as you requested)
+# Helpers: build X (features) and y (target) for MI
 # ============================================================
-def plot_corr_heatmap(corr_mat, title="Correlation heatmap"):
-    cols = corr_mat.columns.tolist()
-    plt.figure(figsize=(12, 8))
-    plt.imshow(corr_mat, aspect="auto")
-    plt.xticks(range(len(cols)), cols, rotation=90)
-    plt.yticks(range(len(cols)), cols)
-    plt.colorbar(label="correlation")
-    plt.title(title)
-    plt.tight_layout()
-    plt.show()
+def build_mi_dataset(df, target_col):
+    """
+    Returns:
+      X_enc: One-hot encoded + numeric, NaNs filled (median for numeric, "MISSING" for cats)
+      y: target as numeric
+    """
+    y = df[target_col].astype(float)
+
+    X = df.drop(columns=[target_col]).copy()
+
+    # split numeric / categorical
+    num_cols = X.select_dtypes(include=["number", "int64", "float64", "Int64"]).columns.tolist()
+    cat_cols = [c for c in X.columns if c not in num_cols]
+
+    # Fill missing
+    for c in num_cols:
+        X[c] = X[c].astype(float)
+        X[c] = X[c].fillna(X[c].median())
+
+    for c in cat_cols:
+        X[c] = X[c].astype("string").fillna("MISSING")
+
+    # One-hot for categoricals
+    X_enc = pd.get_dummies(X, columns=cat_cols, drop_first=False)
+
+    # keep only rows where target is not NaN
+    mask = y.notna()
+    return X_enc.loc[mask], y.loc[mask]
 
 
-def plot_top_corr_bar(top_df, title="Top correlations with target"):
-    # top_df must contain a "corr" column, index=feature name
-    top_df = top_df.sort_values("corr")
+# ============================================================
+# 1) Mutual Information for each feature with the target
+# ============================================================
+def mi_with_target(df, target_col, random_state=42):
+    """
+    Computes mutual information (MI) for each feature in df against target_col.
+    Returns a sorted DataFrame: mi, normalized_mi
+    """
+    X_enc, y = build_mi_dataset(df, target_col)
+
+    # MI for regression-style target (evaluate_note is numeric 0..10)
+    mi = mutual_info_regression(X_enc.values, y.values, random_state=random_state)
+
+    mi_df = pd.DataFrame({"feature": X_enc.columns, "mi": mi})
+    mi_df["mi_norm"] = mi_df["mi"] / (mi_df["mi"].max() + 1e-12)
+    mi_df = mi_df.sort_values("mi", ascending=False).set_index("feature")
+    return mi_df
+
+
+# ============================================================
+# 2) Bar plot of top MI features
+# ============================================================
+def plot_top_mi(mi_df, top_n=20, title="Top Mutual Information with target"):
+    top = mi_df.head(top_n).sort_values("mi")
     plt.figure(figsize=(10, 6))
-    plt.barh(top_df.index.astype(str), top_df["corr"])
-    plt.xlabel("correlation")
+    plt.barh(top.index.astype(str), top["mi"])
+    plt.xlabel("Mutual Information (higher = more informative)")
     plt.title(title)
     plt.tight_layout()
     plt.show()
 
 
 # ============================================================
-# 1) NUMERIC ONLY: correlation matrix + top correlations
+# 3) Compare MI vs Correlation (Spearman) to see overlap
 # ============================================================
-def get_numeric_df(df, target_col):
-    num_cols = df.select_dtypes(include=["number", "int64", "float64", "Int64"]).columns.tolist()
-    if target_col not in num_cols:
-        raise ValueError(f"Target '{target_col}' must be numeric for correlation.")
-    return df[num_cols].copy()
+def corr_with_target_encoded(df, target_col, method="spearman"):
+    """
+    Encodes categoricals (one-hot) + keeps numeric; computes correlation with target.
+    Returns a Series indexed by feature.
+    """
+    X_enc, y = build_mi_dataset(df, target_col)
+    tmp = X_enc.copy()
+    tmp[target_col] = y.values
+    corr = tmp.corr(method=method)[target_col].drop(target_col).dropna()
+    return corr
 
 
-def corr_matrix(df_numeric, method="spearman"):
-    return df_numeric.corr(method=method)
+def compare_mi_vs_corr(df, target_col, top_n=30, corr_method="spearman"):
+    """
+    Returns a DataFrame containing MI + corr + ranks.
+    Also returns overlap list (features in both top lists).
+    """
+    mi_df = mi_with_target(df, target_col)
+    corr_s = corr_with_target_encoded(df, target_col, method=corr_method)
+
+    # align
+    comp = pd.DataFrame({
+        "mi": mi_df["mi"],
+        "corr": corr_s
+    }).dropna()
+
+    comp["abs_corr"] = comp["corr"].abs()
+
+    # top lists
+    top_mi = comp.sort_values("mi", ascending=False).head(top_n).index
+    top_corr = comp.sort_values("abs_corr", ascending=False).head(top_n).index
+    overlap = list(set(top_mi).intersection(set(top_corr)))
+
+    comp["mi_rank"] = comp["mi"].rank(ascending=False, method="dense")
+    comp["corr_rank"] = comp["abs_corr"].rank(ascending=False, method="dense")
+    comp = comp.sort_values(["mi_rank", "corr_rank"])
+
+    return comp, overlap
 
 
-def top_corr_with_target_from_matrix(corr_mat, target_col, top_n=20):
-    s = corr_mat[target_col].drop(target_col).dropna()
-    out = pd.DataFrame({"corr": s, "abs_corr": s.abs()}).sort_values("abs_corr", ascending=False).head(top_n)
+def plot_mi_vs_corr_scatter(comp_df, title="MI vs |Correlation|"):
+    """
+    Scatter plot: each point is a feature.
+    x = |corr|, y = MI
+    """
+    plt.figure(figsize=(6, 5))
+    plt.scatter(comp_df["abs_corr"], comp_df["mi"], s=20)
+    plt.xlabel("|Correlation| (Spearman)")
+    plt.ylabel("Mutual Information")
+    plt.title(title)
+    plt.tight_layout()
+    plt.show()
+
+
+# ============================================================
+# 4) 2D plots for top MI features (easy to understand)
+#    - If feature is binary (0/1): boxplot-like using jitter scatter
+#    - If numeric: scatter plot
+# ============================================================
+def is_binary_series(s):
+    vals = pd.Series(s).dropna().unique()
+    return len(vals) <= 2 and set(vals).issubset({0, 1})
+
+
+def plot_top_mi_features_2d(df, target_col, top_n=6, random_state=42):
+    """
+    Picks top MI features (from encoded set) and draws a simple plot per feature.
+    """
+    mi_df = mi_with_target(df, target_col, random_state=random_state)
+    X_enc, y = build_mi_dataset(df, target_col)
+
+    top_feats = mi_df.head(top_n).index.tolist()
+
+    for f in top_feats:
+        x = X_enc[f].values
+        yy = y.values
+
+        plt.figure(figsize=(6, 4))
+
+        if is_binary_series(x):
+            # jitter scatter for 0/1
+            jitter = (np.random.RandomState(0).rand(len(x)) - 0.5) * 0.08
+            plt.scatter(x + jitter, yy, s=15)
+            plt.xticks([0, 1], [f"{f}=0", f"{f}=1"])
+            plt.xlabel("Binary feature")
+        else:
+            plt.scatter(x, yy, s=15)
+            plt.xlabel(f)
+
+        plt.ylabel(target_col)
+        plt.title(f"2D view: {f} vs {target_col} (high MI)")
+        plt.tight_layout()
+        plt.show()
+
+
+# ============================================================
+# 5) Joint analysis (MI of pairs): see how TWO features together help
+#    Simple approach:
+#      - pick top_k features by MI
+#      - discretize both features into bins
+#      - build a combined "pair" feature
+#      - compute MI(pair, target)
+# ============================================================
+def mi_joint_pairs(df, target_col, top_k=12, bins=6, random_state=42):
+    """
+    Returns MI for feature pairs (top_k features).
+    Uses discretization and a combined pair label to measure joint information.
+    """
+    mi_df = mi_with_target(df, target_col, random_state=random_state)
+    X_enc, y = build_mi_dataset(df, target_col)
+
+    feats = mi_df.head(top_k).index.tolist()
+    X = X_enc[feats].copy()
+
+    # discretize (works for numeric; for one-hot 0/1 it stays basically same)
+    disc = KBinsDiscretizer(n_bins=bins, encode="ordinal", strategy="quantile")
+    Xb = disc.fit_transform(X.values)
+
+    pair_scores = []
+    n = len(feats)
+
+    for i in range(n):
+        for j in range(i + 1, n):
+            a = Xb[:, i].astype(int)
+            b = Xb[:, j].astype(int)
+
+            # combine into one label: a * big + b
+            pair = a * 1000 + b
+
+            # MI between pair and target (treat pair as a discrete feature)
+            # mutual_info_regression can handle discrete-ish numeric, but we help by casting float
+            score = mutual_info_regression(pair.reshape(-1, 1), y.values, random_state=random_state)[0]
+            pair_scores.append((feats[i], feats[j], score))
+
+    out = pd.DataFrame(pair_scores, columns=["feat1", "feat2", "mi_pair"])
+    out["mi_pair_norm"] = out["mi_pair"] / (out["mi_pair"].max() + 1e-12)
+    out = out.sort_values("mi_pair", ascending=False)
     return out
 
 
-# ============================================================
-# 2) One-hot encode ONE categorical column (kept separate)
-# ============================================================
-def onehot_encode_column(df, col):
-    if col not in df.columns:
-        raise ValueError(f"Column '{col}' not found in df.")
-    return pd.get_dummies(df[col], prefix=col)
+def plot_top_joint_pairs(joint_df, top_n=15, title="Top joint MI feature pairs"):
+    top = joint_df.head(top_n).copy()
+    labels = (top["feat1"] + " + " + top["feat2"]).tolist()
 
-
-# ============================================================
-# 3) Categorical group analysis (heatmap + top correlations)
-#    Functions separated: one returns matrices, others plot them.
-# ============================================================
-def categorical_group_corr(df, cat_col, target_col, method="spearman"):
-    dummies = onehot_encode_column(df, cat_col)
-    tmp = dummies.copy()
-    tmp[target_col] = df[target_col]
-    corr_mat = tmp.corr(method=method)
-    return corr_mat
-
-
-def categorical_group_top_corr(df, cat_col, target_col, method="spearman", top_n=20):
-    dummies = onehot_encode_column(df, cat_col)
-    tmp = dummies.copy()
-    tmp[target_col] = df[target_col]
-    corr_mat = tmp.corr(method=method)
-    top_df = top_corr_with_target_from_matrix(corr_mat, target_col, top_n=top_n)
-    return top_df
-
-
-# ============================================================
-# 4) Special for list_prest: keep ONLY top 20 correlated levels
-#    Then heatmap only among those top levels + target
-# ============================================================
-def list_prest_top20_heatmap_data(df, list_prest_col, target_col, method="spearman", top_n=20):
-    dummies = onehot_encode_column(df, list_prest_col)
-    tmp = dummies.copy()
-    tmp[target_col] = df[target_col]
-
-    corr_to_target = tmp.corr(method=method)[target_col].drop(target_col).dropna()
-    top_cols = corr_to_target.abs().sort_values(ascending=False).head(top_n).index.tolist()
-
-    # return a small correlation matrix: top 20 levels + target
-    corr_small = tmp[top_cols + [target_col]].corr(method=method)
-    return corr_small, top_cols
-
-
-def list_prest_top20_table(df, list_prest_col, target_col, method="spearman", top_n=20):
-    dummies = onehot_encode_column(df, list_prest_col)
-    tmp = dummies.copy()
-    tmp[target_col] = df[target_col]
-    corr_mat = tmp.corr(method=method)
-    top_df = top_corr_with_target_from_matrix(corr_mat, target_col, top_n=top_n)
-    return top_df
-
-
-# ============================================================
-# 5) Parcours FINAL + INITIAL together (encoded together)
-# ============================================================
-def two_categorical_cols_corr(df, col_a, col_b, target_col, method="spearman"):
-    da = onehot_encode_column(df, col_a)
-    db = onehot_encode_column(df, col_b)
-    tmp = pd.concat([da, db], axis=1)
-    tmp[target_col] = df[target_col]
-    return tmp.corr(method=method)
-
-
-# ============================================================
-# 6) Delays correlation with target (bar plot-friendly)
-# ============================================================
-def delays_corr_with_target(df, delay_cols, target_col, method="spearman"):
-    rows = []
-    for c in delay_cols:
-        if c in df.columns:
-            corr = df[[c, target_col]].corr(method=method).iloc[0, 1]
-            rows.append((c, corr))
-    out = pd.DataFrame(rows, columns=["delay_col", "corr"]).assign(abs_corr=lambda d: d["corr"].abs())
-    out = out.sort_values("abs_corr", ascending=False).set_index("delay_col")
-    return out
-
-
-def plot_delays_corr(delay_corr_df, title="Delays correlation with target"):
-    d = delay_corr_df.sort_values("corr")
     plt.figure(figsize=(10, 6))
-    plt.barh(d.index.astype(str), d["corr"])
-    plt.xlabel("correlation")
+    plt.barh(labels[::-1], top["mi_pair"].values[::-1])
+    plt.xlabel("Mutual Information (pair)")
     plt.title(title)
-    plt.tight_layout()
-    plt.show()
-
-
-# ============================================================
-# 7) nombre_prestation_ko: more informative plot
-#    - Boxplot of evaluate_note for each KO count (0..5)
-#    - And mean+count line chart (two axes) for extra info
-# ============================================================
-def ko_corr_with_target(df, ko_col, target_col, method="spearman"):
-    if ko_col not in df.columns:
-        raise ValueError(f"Column '{ko_col}' not found in df")
-    return df[[ko_col, target_col]].corr(method=method).iloc[0, 1]
-
-
-def plot_ko_effect(df, ko_col, target_col, max_ko=5):
-    tmp = df[[ko_col, target_col]].dropna().copy()
-    tmp = tmp[tmp[ko_col].between(0, max_ko)]
-
-    # (A) Boxplot (distribution)
-    plt.figure(figsize=(10, 4))
-    tmp.boxplot(column=target_col, by=ko_col, grid=False)
-    plt.title(f"{target_col} distribution by {ko_col} (0..{max_ko})")
-    plt.suptitle("")
-    plt.xlabel(ko_col)
-    plt.ylabel(target_col)
-    plt.tight_layout()
-    plt.show()
-
-    # (B) Mean + Count per KO value (more info)
-    g = tmp.groupby(ko_col)[target_col].agg(["mean", "count"]).reindex(range(max_ko + 1))
-    fig, ax1 = plt.subplots(figsize=(10, 4))
-
-    ax1.plot(g.index, g["mean"], marker="o")
-    ax1.set_xlabel(ko_col)
-    ax1.set_ylabel(f"Mean {target_col}")
-
-    ax2 = ax1.twinx()
-    ax2.bar(g.index, g["count"], alpha=0.3)
-    ax2.set_ylabel("Count")
-
-    plt.title(f"Mean {target_col} and sample size by {ko_col}")
     plt.tight_layout()
     plt.show()
 
@@ -189,67 +234,25 @@ def plot_ko_effect(df, ko_col, target_col, max_ko=5):
 
 TARGET_COL = "evaluate_note"
 
-PARCOURS_FINAL_COL = "PARCOURS_FINAL"
-PARCOURS_INITIAL_COL = "PARCOURS_INITIAL"
-LIST_PREST_COL = "list_prest"
+# 1) MI for every feature
+mi_df = mi_with_target(df, TARGET_COL)
+print("\n[1] Mutual Information with target (top 30):\n", mi_df.head(30))
 
-# Put your delay columns here (minutes)
-DELAY_COLS = [
-    # "delai_sinistre",
-    # "delai_indemnisation",
-    # "delai_preparation",
-]
+# 2) Bar plot top MI
+plot_top_mi(mi_df, top_n=20, title="[2] Top MI features with evaluate_note")
 
-KO_COL = "nombre_prestation_ko"   # change if different
+# 3) Compare MI vs correlation + overlap + scatter
+comp_df, overlap = compare_mi_vs_corr(df, TARGET_COL, top_n=30, corr_method="spearman")
+print("\n[3] MI vs |corr| comparison (top rows):\n", comp_df.head(30))
+print("\n[3] Overlap features (in both top MI and top |corr|):\n", overlap)
+plot_mi_vs_corr_scatter(comp_df, title="[3] MI vs |Correlation| (Spearman)")
 
+# 4) 2D plots for top MI features
+plot_top_mi_features_2d(df, TARGET_COL, top_n=6)
 
-# 1) Heat correlation plot for NUMERIC variables alone
-df_num = get_numeric_df(df, TARGET_COL)
-corr_num = corr_matrix(df_num, method="spearman")
-plot_corr_heatmap(corr_num, title="NUMERIC correlation heatmap (Spearman)")
-
-# 2) One-hot encoding for categorical data
-# (we keep it per-column; encoding is inside functions)
-
-# 3) Top correlation for NUMERIC data alone
-top_num = top_corr_with_target_from_matrix(corr_num, TARGET_COL, top_n=20)
-print("\nTop correlations with target (NUMERIC only):\n", top_num)
-plot_top_corr_bar(top_num, title="Top correlations with target (NUMERIC only)")
-
-# 4) PARCOURS_FINAL alone: heatmap + top correlations
-corr_pf = categorical_group_corr(df, PARCOURS_FINAL_COL, TARGET_COL, method="spearman")
-plot_corr_heatmap(corr_pf, title="PARCOURS_FINAL correlation heatmap (Spearman)")
-top_pf = categorical_group_top_corr(df, PARCOURS_FINAL_COL, TARGET_COL, method="spearman", top_n=20)
-print("\nTop correlations (PARCOURS_FINAL levels):\n", top_pf)
-plot_top_corr_bar(top_pf, title="Top correlations with target (PARCOURS_FINAL levels)")
-
-# 5) PARCOURS_INITIAL alone: heatmap + top correlations
-corr_pi = categorical_group_corr(df, PARCOURS_INITIAL_COL, TARGET_COL, method="spearman")
-plot_corr_heatmap(corr_pi, title="PARCOURS_INITIAL correlation heatmap (Spearman)")
-top_pi = categorical_group_top_corr(df, PARCOURS_INITIAL_COL, TARGET_COL, method="spearman", top_n=20)
-print("\nTop correlations (PARCOURS_INITIAL levels):\n", top_pi)
-plot_top_corr_bar(top_pi, title="Top correlations with target (PARCOURS_INITIAL levels)")
-
-# 6) list_prest alone: ONLY top 20 correlated with target + heatmap + top corr plot
-corr_lp_top20, lp_cols = list_prest_top20_heatmap_data(df, LIST_PREST_COL, TARGET_COL, method="spearman", top_n=20)
-plot_corr_heatmap(corr_lp_top20, title="list_prest heatmap (TOP 20 levels by |corr| with target)")
-top_lp = list_prest_top20_table(df, LIST_PREST_COL, TARGET_COL, method="spearman", top_n=20)
-print("\nTop correlations (list_prest TOP 20 levels):\n", top_lp)
-plot_top_corr_bar(top_lp, title="Top correlations with target (list_prest TOP 20 levels)")
-
-# 7) Heatmap for PARCOURS_FINAL + PARCOURS_INITIAL together
-corr_pf_pi = two_categorical_cols_corr(df, PARCOURS_FINAL_COL, PARCOURS_INITIAL_COL, TARGET_COL, method="spearman")
-plot_corr_heatmap(corr_pf_pi, title="PARCOURS_FINAL + PARCOURS_INITIAL heatmap (encoded together)")
-
-# 8) Each delay correlation with target (bar plot)
-delay_corr = delays_corr_with_target(df, DELAY_COLS, TARGET_COL, method="spearman")
-print("\nDelay correlations with target:\n", delay_corr)
-plot_delays_corr(delay_corr, title="Delays correlation with evaluate_note")
-
-# 9) nombre_prestation_ko correlation with target + more informative plots
-ko_corr = ko_corr_with_target(df, KO_COL, TARGET_COL, method="spearman")
-print(f"\nCorrelation({KO_COL}, {TARGET_COL}) = {ko_corr:.4f}")
-plot_ko_effect(df, KO_COL, TARGET_COL, max_ko=5)
-
+# 5) Joint analysis (pairs)
+joint_df = mi_joint_pairs(df, TARGET_COL, top_k=12, bins=6)
+print("\n[5] Joint MI pairs (top 20):\n", joint_df.head(20))
+plot_top_joint_pairs(joint_df, top_n=15, title="[5] Top joint MI pairs")
 
 ```
