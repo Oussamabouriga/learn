@@ -1,85 +1,60 @@
 ```
-import numpy as np
-import pandas as pd
 import matplotlib.pyplot as plt
+import pandas as pd
 
-def plot_note_distribution_by_delay(
+def plot_delay_scatter_colored_by_note(
     df: pd.DataFrame,
     delay_col: str,
-    note_col: str,                 # evaluate_note
-    delay_breaks,                  # custom bins e.g. [0,10,30,60,120,300,600,1500,5000]
-    delay_range=None,              # optional (min,max)
-    mode="percent",                # "percent" or "count"
-    notes_order=None               # optional list like [0,1,...,10]
+    note_col: str,
+    delay_range=None,
+    jitter_y=False,     # True if many points overlap
+    alpha=0.6,
+    size=18
 ):
     d = df[[delay_col, note_col]].dropna().copy()
 
-    # optional delay filter
     if delay_range is not None:
         d = d[(d[delay_col] >= delay_range[0]) & (d[delay_col] <= delay_range[1])]
 
-    delay_breaks = sorted(list(delay_breaks))
+    # Optional jitter on Y to see overlapping points
+    if jitter_y:
+        import numpy as np
+        d[note_col] = d[note_col] + np.random.uniform(-0.12, 0.12, size=len(d))
 
-    # bin delay
-    d["delay_bin"] = pd.cut(
-        d[delay_col],
-        bins=delay_breaks,
-        right=False,
-        include_lowest=True
-    )
+    # make note categorical (so same note => same color)
+    d["note_cat"] = d[note_col].astype(int).astype(str)
 
-    # counts per (delay_bin, note)
-    c = (d.groupby(["delay_bin", note_col], observed=True)
-           .size()
-           .reset_index(name="count"))
+    plt.figure(figsize=(12, 6))
 
-    # pivot: rows=delay_bin, cols=note, values=count
-    p = (c.pivot_table(index="delay_bin", columns=note_col, values="count", fill_value=0)
-           .sort_index())
+    # plot each note separately => different color automatically
+    for note_value in sorted(d["note_cat"].unique(), key=lambda x: int(x)):
+        sub = d[d["note_cat"] == note_value]
+        plt.scatter(
+            sub[delay_col],
+            sub[note_col],
+            s=size,
+            alpha=alpha,
+            label=note_value
+        )
 
-    # ensure notes order
-    if notes_order is None:
-        notes_order = sorted(p.columns.tolist())
-    else:
-        notes_order = [n for n in notes_order if n in p.columns]
-    p = p[notes_order]
-
-    # convert to percent distribution within each delay bin
-    if mode == "percent":
-        denom = p.sum(axis=1).replace(0, np.nan)
-        ydata = (p.div(denom, axis=0) * 100)
-        ylabel = "Distribution (%)"
-    else:
-        ydata = p
-        ylabel = "Count"
-
-    x = np.arange(len(ydata.index))
-    xlabels = [str(iv) for iv in ydata.index]
-
-    # plot: one curve per note
-    plt.figure(figsize=(14, 6))
-    for note in ydata.columns:
-        plt.plot(x, ydata[note].values, marker="o", linewidth=2, label=f"{note_col}={note}")
-
-    plt.xticks(x, xlabels, rotation=30, ha="right")
-    plt.xlabel(f"{delay_col} bins")
-    plt.ylabel(ylabel)
-    plt.title(f"Distribution of {note_col} by {delay_col}")
+    plt.xlabel(delay_col)
+    plt.ylabel(note_col)
+    plt.title(f"Scatter: {note_col} by {delay_col} (color = note)")
     plt.grid(True, alpha=0.3)
-    plt.legend(title="Note", ncol=2)
+
+    # if your notes are 0..10, keep fixed y-limits
+    plt.ylim(-0.5, 10.5)
+
+    plt.legend(title="Note", ncol=2, bbox_to_anchor=(1.02, 1), loc="upper left")
     plt.tight_layout()
     plt.show()
 
-    return ydata  # table used for plotting
-
-
-plot_note_distribution_by_delay(
+plot_delay_scatter_colored_by_note(
     df,
     delay_col="delai_declaration",
     note_col="evaluate_note",
-    delay_breaks=[0, 10, 30, 60, 120, 300, 600, 1500, 5000],
     delay_range=(0, 5000),
-    mode="percent",           # or "count"
-    notes_order=list(range(0, 11))
+    jitter_y=True
 )
+
 ```
