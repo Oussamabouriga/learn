@@ -4,29 +4,33 @@ import matplotlib.pyplot as plt
 
 def plot_corr_heatmap(corr_mat, title="Correlation heatmap"):
     cols = corr_mat.columns.tolist()
-
-    # Convert to numpy, keep NaNs to handle them
     data = corr_mat.values.astype(float)
 
     fig, ax = plt.subplots(figsize=(12, 8))
 
-    # --- Make NaNs visible instead of "random white blocks" ---
-    # Option A (recommended): show NaNs as light gray
-    cmap = plt.cm.RdBu_r.copy()   # diverging map good for correlations
-    cmap.set_bad(color="lightgray")
+    # viridis like your first plot + handle NaN
+    cmap = plt.cm.viridis.copy()
+    cmap.set_bad(color="lightgray")  # NaNs shown as light gray (not random white)
 
     im = ax.imshow(
-        np.ma.masked_invalid(data),   # mask NaNs => uses set_bad color
+        np.ma.masked_invalid(data),
         aspect="auto",
-        vmin=-1, vmax=1,
+        vmin=-1, vmax=1,              # fixed correlation range
         cmap=cmap,
-        interpolation="nearest"       # avoids weird smoothing artifacts
+        interpolation="nearest"       # keeps blocks clean, no artifacts
     )
 
     ax.set_xticks(range(len(cols)))
     ax.set_xticklabels(cols, rotation=90)
     ax.set_yticks(range(len(cols)))
     ax.set_yticklabels(cols)
+
+    # ✅ remove grid (some styles add it)
+    ax.grid(False)
+
+    # also remove any cell borders if they appear from styling
+    ax.set_xticks([], minor=True)
+    ax.set_yticks([], minor=True)
 
     cbar = fig.colorbar(im, ax=ax)
     cbar.set_label("correlation")
