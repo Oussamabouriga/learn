@@ -3,30 +3,24 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-def plot_volume_nps(
-    df,
-    age_col,
-    delay_col,
-    score_col,               # evaluate_note column
-    delay_breaks,            # custom delay bins
-    age_range=(18, 100),
-    delay_range=None,
-    promoters_min=9,
-    detractors_max=6,
+def plot_note_distribution_by_delay(
+    df: pd.DataFrame,
+    delay_col: str,
+    note_col: str,                 # evaluate_note
+    delay_breaks,                  # custom bins e.g. [0,10,30,60,120,300,600,1500,5000]
+    delay_range=None,              # optional (min,max)
+    mode="percent",                # "percent" or "count"
+    notes_order=None               # optional list like [0,1,...,10]
 ):
+    d = df[[delay_col, note_col]].dropna().copy()
 
-    d = df[[age_col, delay_col, score_col]].dropna().copy()
-
-    # Filter age
-    d = d[(d[age_col] >= age_range[0]) & (d[age_col] <= age_range[1])]
-
-    # Optional delay filter
+    # optional delay filter
     if delay_range is not None:
         d = d[(d[delay_col] >= delay_range[0]) & (d[delay_col] <= delay_range[1])]
 
-    delay_breaks = sorted(delay_breaks)
+    delay_breaks = sorted(list(delay_breaks))
 
-    # Create delay bins
+    # bin delay
     d["delay_bin"] = pd.cut(
         d[delay_col],
         bins=delay_breaks,
@@ -34,83 +28,58 @@ def plot_volume_nps(
         include_lowest=True
     )
 
-    # NPS function
-    def compute_nps(scores):
-        if len(scores) == 0:
-            return np.nan
-        promoters = (scores >= promoters_min).mean() * 100
-        detractors = (scores <= detractors_max).mean() * 100
-        return promoters - detractors
+    # counts per (delay_bin, note)
+    c = (d.groupby(["delay_bin", note_col], observed=True)
+           .size()
+           .reset_index(name="count"))
 
-    # Aggregate per delay bin
-    g = (
-        d.groupby("delay_bin", observed=True)
-        .agg(
-            volume=("delay_bin", "size"),
-            nps=(score_col, compute_nps)
-        )
-        .reset_index()
-    )
+    # pivot: rows=delay_bin, cols=note, values=count
+    p = (c.pivot_table(index="delay_bin", columns=note_col, values="count", fill_value=0)
+           .sort_index())
 
-    # Prepare x-axis
-    x = np.arange(len(g))
-    x_labels = g["delay_bin"].astype(str)
+    # ensure notes order
+    if notes_order is None:
+        notes_order = sorted(p.columns.tolist())
+    else:
+        notes_order = [n for n in notes_order if n in p.columns]
+    p = p[notes_order]
 
-    # Plot
-    fig, ax = plt.subplots(figsize=(12, 6))
+    # convert to percent distribution within each delay bin
+    if mode == "percent":
+        denom = p.sum(axis=1).replace(0, np.nan)
+        ydata = (p.div(denom, axis=0) * 100)
+        ylabel = "Distribution (%)"
+    else:
+        ydata = p
+        ylabel = "Count"
 
-    # Bars = volume
-    bars = ax.bar(x, g["volume"], alpha=0.4)
-    ax.set_ylabel("Volume (Number of people)")
+    x = np.arange(len(ydata.index))
+    xlabels = [str(iv) for iv in ydata.index]
 
-    # Add volume labels
-    for i, b in enumerate(bars):
-        ax.text(
-            b.get_x() + b.get_width() / 2,
-            b.get_height(),
-            f"{int(g['volume'][i])}",
-            ha="center",
-            va="bottom",
-            fontsize=9
-        )
+    # plot: one curve per note
+    plt.figure(figsize=(14, 6))
+    for note in ydata.columns:
+        plt.plot(x, ydata[note].values, marker="o", linewidth=2, label=f"{note_col}={note}")
 
-    # NPS line
-    ax2 = ax.twinx()
-    ax2.plot(x, g["nps"], marker="o", linewidth=2)
-    ax2.set_ylabel("NPS")
-    ax2.set_ylim(-100, 100)
-
-    # Add NPS labels
-    for i, val in enumerate(g["nps"]):
-        if not np.isnan(val):
-            ax2.annotate(
-                f"{val:.0f}",
-                (x[i], val),
-                textcoords="offset points",
-                xytext=(0, 8),
-                ha="center",
-                fontsize=9
-            )
-
-    ax.set_xticks(x)
-    ax.set_xticklabels(x_labels, rotation=30, ha="right")
-    ax.set_xlabel(delay_col)
-
-    plt.title("Volume (bars) + Global NPS (line)")
-    plt.grid(True, axis="y", alpha=0.3)
+    plt.xticks(x, xlabels, rotation=30, ha="right")
+    plt.xlabel(f"{delay_col} bins")
+    plt.ylabel(ylabel)
+    plt.title(f"Distribution of {note_col} by {delay_col}")
+    plt.grid(True, alpha=0.3)
+    plt.legend(title="Note", ncol=2)
     plt.tight_layout()
     plt.show()
 
-    return g
+    return ydata  # table used for plotting
 
 
-plot_volume_nps(
+plot_note_distribution_by_delay(
     df,
-    age_col="age",
     delay_col="delai_declaration",
-    score_col="evaluate_note",
+    note_col="evaluate_note",
     delay_breaks=[0, 10, 30, 60, 120, 300, 600, 1500, 5000],
-    delay_range=(0, 5000)
+    delay_range=(0, 5000),
+    mode="percent",           # or "count"
+    notes_order=list(range(0, 11))
 )
-
 ```
