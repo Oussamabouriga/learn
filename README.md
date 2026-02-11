@@ -1,41 +1,25 @@
 ```
-import numpy as np
 import matplotlib.pyplot as plt
 
-def plot_corr_heatmap(corr_mat, title="Correlation heatmap"):
-    cols = corr_mat.columns.tolist()
-    data = corr_mat.values.astype(float)
+def plot_top_mi_columns(mi_cols_df, top_n=15, title="Top MI (column-level, fair)", show_values=True):
+    top = mi_cols_df.head(top_n).sort_values("mi")
 
-    fig, ax = plt.subplots(figsize=(12, 8))
+    fig, ax = plt.subplots(figsize=(10, 6))
+    bars = ax.barh(top.index.astype(str), top["mi"])
 
-    # viridis like your first plot + handle NaN
-    cmap = plt.cm.viridis.copy()
-    cmap.set_bad(color="lightgray")  # NaNs shown as light gray (not random white)
+    # ✅ force axis 0..1
+    ax.set_xlim(0, 1)
 
-    im = ax.imshow(
-        np.ma.masked_invalid(data),
-        aspect="auto",
-        vmin=-1, vmax=1,              # fixed correlation range
-        cmap=cmap,
-        interpolation="nearest"       # keeps blocks clean, no artifacts
-    )
-
-    ax.set_xticks(range(len(cols)))
-    ax.set_xticklabels(cols, rotation=90)
-    ax.set_yticks(range(len(cols)))
-    ax.set_yticklabels(cols)
-
-    # ✅ remove grid (some styles add it)
-    ax.grid(False)
-
-    # also remove any cell borders if they appear from styling
-    ax.set_xticks([], minor=True)
-    ax.set_yticks([], minor=True)
-
-    cbar = fig.colorbar(im, ax=ax)
-    cbar.set_label("correlation")
-
+    ax.set_xlabel("Mutual Information (higher = more informative)")
     ax.set_title(title)
+
+    # ✅ add value label on each bar
+    if show_values:
+        for y, v in enumerate(top["mi"].values):
+            # keep text inside the axis even near 1.0
+            x = min(v + 0.02, 0.98)
+            ax.text(x, y, f"{v:.3f}", va="center", ha="left", fontsize=9)
+
     plt.tight_layout()
     plt.show()
 
