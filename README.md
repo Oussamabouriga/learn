@@ -1,47 +1,104 @@
 ```
+
+import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
 
-def plot_mi_levels_with_counts(mi_levels_df, title="Information mutuelle + nombre de valeurs",
-                               show_mi_values=True, show_count_values=True):
-    if mi_levels_df.empty:
-        print("No levels to plot.")
-        return
+def plot_volume_nps(
+    df,
+    delay_col,
+    score_col,
+    delay_breaks,
+    delay_range=None,
+    promoters_min=9,
+    detractors_max=6,
+):
+    d = df[[delay_col, score_col]].dropna().copy()
 
-    d = mi_levels_df.sort_values("mi")
+    # Optional delay filter
+    if delay_range is not None:
+        d = d[(d[delay_col] >= delay_range[0]) & (d[delay_col] <= delay_range[1])]
 
-    fig, ax1 = plt.subplots(figsize=(10, 6))
+    delay_breaks = sorted(delay_breaks)
 
-    # Bars = MI
-    bars = ax1.barh(d.index.astype(str), d["mi"])
-    ax1.set_xlabel("l'information mutuelle")
-    ax1.set_title(title)
+    # Create delay bins
+    d["delay_bin"] = pd.cut(
+        d[delay_col],
+        bins=delay_breaks,
+        right=False,
+        include_lowest=True
+    )
 
-    # Force MI axis 0..1
-    ax1.set_xlim(0, 1)
+    # NPS function
+    def compute_nps(scores):
+        if len(scores) == 0:
+            return np.nan
+        promoters = (scores >= promoters_min).mean() * 100
+        detractors = (scores <= detractors_max).mean() * 100
+        return promoters - detractors
 
-    # MI labels
-    if show_mi_values:
-        for y, v in enumerate(d["mi"].values):
-            x = min(v + 0.02, 0.98)
-            ax1.text(x, y, f"{v:.3f}", va="center", ha="left", fontsize=9)
+    # Aggregate per delay bin
+    g = (
+        d.groupby("delay_bin", observed=True)
+         .agg(
+             volume=(delay_col, "size"),
+             nps=(score_col, compute_nps)
+         )
+         .reset_index()
+    )
 
-    # Second axis = counts
-    ax2 = ax1.twiny()
-    ax2.plot(d["count"], d.index.astype(str), marker="o")
-    ax2.set_xlabel("nombre de valeurs")
+    # Prepare x-axis
+    x = np.arange(len(g))
+    x_labels = g["delay_bin"].astype(str)
 
-    # Count labels
-    if show_count_values:
-        for y, c in enumerate(d["count"].values):
-            ax2.annotate(f"{int(c)}",
-                         (c, y),
-                         textcoords="offset points",
-                         xytext=(6, 0),
-                         va="center",
-                         fontsize=9)
+    # Plot
+    fig, ax = plt.subplots(figsize=(12, 6))
 
+    # Bars = volume
+    bars = ax.bar(x, g["volume"], alpha=0.4)
+    ax.set_ylabel("Volume")
+
+    # Volume labels
+    for i, b in enumerate(bars):
+        ax.text(
+            b.get_x() + b.get_width() / 2,
+            b.get_height(),
+            f"{int(g['volume'].iloc[i])}",
+            ha="center",
+            va="bottom",
+            fontsize=9
+        )
+
+    # NPS line
+    ax2 = ax.twinx()
+    ax2.plot(x, g["nps"], marker="o", linewidth=2)
+    ax2.set_ylabel("NPS")
+    ax2.set_ylim(-100, 100)
+
+    # NPS labels
+    for i, val in enumerate(g["nps"]):
+        if not np.isnan(val):
+            ax2.annotate(
+                f"{val:.0f}",
+                (x[i], val),
+                textcoords="offset points",
+                xytext=(0, 8),
+                ha="center",
+                fontsize=9
+            )
+
+    ax.set_xticks(x)
+    ax.set_xticklabels(x_labels, rotation=30, ha="right")
+    ax.set_xlabel(delay_col)
+
+    plt.title(f"NPS et Volume par {delay_col}")
+    plt.grid(True, axis="y", alpha=0.3)
     plt.tight_layout()
     plt.show()
 
-```
+    return g
 
+
+
+
+```
