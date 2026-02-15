@@ -1,103 +1,152 @@
 ```
+
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
-import textwrap
+from textwrap import wrap
 
-def plot_top_corr_bar(top_df, title="Top correlations with target", show_values=True):
+def plot_top_corr_bar(
+    top_df,
+    title="Top correlations with target",
+    show_values=True,
+    wrap_width=18,
+    max_label_len=40,
+    dpi=90,
+    figsize=(10, 6),
+    xlim=(-1, 1),
+    max_bars=30,
+):
     """
-    Compatible with your old call:
-        plot_top_corr_bar(top_df, title="...", show_values=True)
+    Plot a horizontal bar chart of correlations.
 
-    Expects:
-      - DataFrame with column 'corr' and index = feature names
-      - OR DataFrame with a single numeric column
-      - OR Series
+    Works with:
+    - pd.DataFrame with a column named 'corr' (and optional 'abs_corr'), index = feature names
+    - pd.Series where values are correlations, index = feature names
+    - pd.DataFrame with ONE numeric column (will be used)
+
+    Keeps the same way of calling:
+        plot_top_corr_bar(top_num_delai_sinistre, title="...")
+
+    Parameters
+    ----------
+    top_df : pd.DataFrame or pd.Series
+    title : str
+    show_values : bool
+    wrap_width : int      wrap long labels to multiple lines
+    max_label_len : int   truncate very long labels
+    dpi : int             low dpi to avoid "image too large" in notebooks
+    figsize : tuple       inches
+    xlim : tuple or None  if None -> auto based on data
+    max_bars : int        max number of bars to plot (prevents huge figures)
     """
 
-    if top_df is None or len(top_df) == 0:
-        print("No data to plot.")
-        return None
-
-    # ---- accept Series or DataFrame
-    if hasattr(top_df, "to_frame") and not hasattr(top_df, "columns"):
+    # -----------------------------
+    # 1) Normalize input to a DataFrame with column 'corr'
+    # -----------------------------
+    if isinstance(top_df, pd.Series):
         d = top_df.to_frame(name="corr").copy()
-    else:
+    elif isinstance(top_df, pd.DataFrame):
         d = top_df.copy()
 
-    # ---- choose the column to plot
-    if "corr" in d.columns:
-        col = "corr"
-    else:
-        # fallback: first numeric column
-        num_cols = [c for c in d.columns if np.issubdtype(d[c].dtype, np.number)]
-        if len(num_cols) == 0:
-            # try coerce the first column
-            col = d.columns[0]
-            d[col] = np.to_numeric(d[col], errors="coerce")
+        if "corr" in d.columns:
+            d = d[["corr"]].copy()
         else:
-            col = num_cols[0]
+            # take first numeric column
+            num_cols = d.select_dtypes(include="number").columns.tolist()
+            if len(num_cols) == 0:
+                raise ValueError("plot_top_corr_bar: no numeric column found.")
+            d = d[[num_cols[0]]].rename(columns={num_cols[0]: "corr"}).copy()
+    else:
+        raise TypeError("plot_top_corr_bar: top_df must be a pandas DataFrame or Series.")
 
-    d = d[[col]].rename(columns={col: "corr"}).copy()
-    d["corr"] = np.to_numeric(d["corr"], errors="coerce")
-    d = d.dropna()
+    # Make sure corr is numeric (FIX: pd.to_numeric, not np.to_numeric)
+    d["corr"] = pd.to_numeric(d["corr"], errors="coerce")
+    d = d.dropna(subset=["corr"])
 
     if d.empty:
-        print("No numeric values to plot.")
-        return None
+        print("plot_top_corr_bar: no valid numeric values to plot.")
+        return d
 
-    # ---- sort for nice order
+    # -----------------------------
+    # 2) Safety: limit number of bars (avoid giant renders)
+    # -----------------------------
+    # If your input has many rows, keep only strongest absolute values
+    if len(d) > max_bars:
+        d = d.reindex(d["corr"].abs().sort_values(ascending=False).head(max_bars).index)
+
+    # Sort so bars are ordered (negative -> positive)
     d = d.sort_values("corr")
 
-    # ---- safe labels (wrap + truncate)
+    # -----------------------------
+    # 3) Prepare labels (truncate + wrap)
+    # -----------------------------
     labels = d.index.astype(str).tolist()
-    labels = ["\n".join(textwrap.wrap(s, width=16)) for s in labels]
-    labels = [(s if len(s) <= 30 else s[:29] + "…") for s in labels]
 
-    vals = d["corr"].to_numpy()
-    y = np.arange(len(vals))
+    def format_label(s: str) -> str:
+        s = s.strip()
+        if len(s) > max_label_len:
+            s = s[: max_label_len - 3] + "..."
+        if wrap_width is not None and wrap_width > 0:
+            return "\n".join(wrap(s, width=wrap_width)) if len(s) > wrap_width else s
+        return s
 
-    # ---- choose xlim:
-    # if it looks like real correlation -> fixed [-1,1]
-    absmax = float(np.nanmax(np.abs(vals)))
-    if absmax <= 1.2:
-        xmin, xmax = -1.0, 1.0
+    labels = [format_label(s) for s in labels]
+
+    # -----------------------------
+    # 4) Decide x-limits
+    # -----------------------------
+    # If values are not in [-1, 1], don't force (-1, 1) (auto-scale instead)
+    v = d["corr"].values
+    max_abs = float(np.nanmax(np.abs(v)))
+
+    if xlim is None:
+        # Auto symmetrical range
+        if max_abs == 0:
+            lim = 1
+        else:
+            lim = max_abs * 1.1
+        xlim_use = (-lim, lim)
     else:
-        # not correlation values (like your millions) -> autoscale safely
-        pad = 0.05 * absmax
-        xmin, xmax = -absmax - pad, absmax + pad
+        # If user passed (-1,1) but data clearly bigger, auto-scale to avoid squashing
+        if (abs(xlim[0]) == 1 and abs(xlim[1]) == 1) and max_abs > 1.5:
+            lim = max_abs * 1.1
+            xlim_use = (-lim, lim)
+        else:
+            xlim_use = xlim
 
-    # ---- plot
-    fig, ax = plt.subplots(figsize=(10, 6), dpi=90)
-    ax.barh(y, vals)
+    # -----------------------------
+    # 5) Plot (low DPI + fixed figsize to avoid "image too large")
+    # -----------------------------
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
+    y = np.arange(len(d))
+
+    ax.barh(y, d["corr"].values)
     ax.set_yticks(y)
     ax.set_yticklabels(labels)
-    ax.set_xlim(xmin, xmax)
-    ax.axvline(0, linewidth=1)
-    ax.set_xlabel("correlation")
     ax.set_title(title)
+    ax.set_xlabel("correlation")
 
-    # ---- values text: ALWAYS keep inside axes (prevents giant canvas)
+    # vertical line at 0 for readability
+    ax.axvline(0, linewidth=1)
+
+    # x-limits
+    ax.set_xlim(xlim_use)
+
+    # value labels
     if show_values:
-        rng = (xmax - xmin) if (xmax > xmin) else 1.0
-        off = 0.02 * rng
+        for yi, val in enumerate(d["corr"].values):
+            if np.isnan(val):
+                continue
+            # offset depends on sign and range
+            offset = 0.02 * (xlim_use[1] - xlim_use[0])
+            x_text = val + (offset if val >= 0 else -offset)
+            ha = "left" if val >= 0 else "right"
+            ax.text(x_text, yi, f"{val:.3f}", va="center", ha=ha, fontsize=9)
 
-        for yi, v in enumerate(vals):
-            # desired position near bar end
-            x_text = v + (off if v >= 0 else -off)
-
-            # clamp inside axes
-            x_text = min(max(x_text, xmin + off), xmax - off)
-
-            ha = "left" if v >= 0 else "right"
-            ax.text(
-                x_text, yi, f"{v:.3f}",
-                va="center", ha=ha, fontsize=9,
-                clip_on=True  # critical: do not expand bbox
-            )
-
-    # Avoid tight_layout (can explode in notebooks)
-    fig.subplots_adjust(left=0.33, right=0.98, top=0.90, bottom=0.12)
-
+    # Tight layout with padding to prevent huge canvas expansions
+    fig.tight_layout(pad=1.0)
     plt.show()
+
     return d
+
 ```
