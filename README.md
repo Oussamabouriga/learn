@@ -2,63 +2,125 @@
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from matplotlib.ticker import MultipleLocator
 
-def plot_top_corr_bar(top_df, title="Top correlations with target", show_values=True):
-    """
-    top_df: DataFrame with at least column 'corr' (index = feature names)
-            (optionally 'abs_corr' can exist; it's ignored for plotting)
-    """
+def plot_volume_nps(
+    df,
+    delay_col,
+    score_col,
+    delay_breaks,
+    delay_range=None,
+    promoters_min=9,
+    detractors_max=6,
+    figsize=(12, 6),
+    title=None,
+):
+    # --- data prep ---
+    d = df[[delay_col, score_col]].dropna().copy()
 
-    # --- accept Series or DataFrame ---
-    if isinstance(top_df, pd.Series):
-        top_df = top_df.to_frame(name="corr")
+    if delay_range is not None:
+        d = d[(d[delay_col] >= delay_range[0]) & (d[delay_col] <= delay_range[1])].copy()
 
-    if not isinstance(top_df, pd.DataFrame):
-        raise TypeError("top_df must be a pandas DataFrame or Series.")
+    delay_breaks = sorted(delay_breaks)
 
-    if "corr" not in top_df.columns:
-        raise ValueError("top_df must contain a column named 'corr'.")
+    d["delay_bin"] = pd.cut(
+        d[delay_col],
+        bins=delay_breaks,
+        right=False,
+        include_lowest=True
+    )
 
-    # --- make sure corr is numeric ---
-    dfp = top_df.copy()
-    dfp["corr"] = pd.to_numeric(dfp["corr"], errors="coerce")
-    dfp = dfp.dropna(subset=["corr"])
+    def compute_nps(scores: pd.Series) -> float:
+        if len(scores) == 0:
+            return np.nan
+        promoters = (scores >= promoters_min).mean() * 100
+        detractors = (scores <= detractors_max).mean() * 100
+        return promoters - detractors
 
-    if dfp.empty:
-        print("plot_top_corr_bar: nothing to plot (empty after cleaning).")
-        return
+    g = (
+        d.groupby("delay_bin", observed=True)
+         .agg(
+             volume=(delay_col, "size"),
+             nps=(score_col, compute_nps),
+         )
+         .reset_index()
+    )
 
-    # order negative -> positive (like your screenshot)
-    dfp = dfp.sort_values("corr")
+    # --- pretty x labels ---
+    def _format_minutes_to_compact(m: float) -> str:
+        m_int = int(round(m))
+        if m_int < 60:
+            return f"{m_int}m"
+        total_minutes = m_int
+        days = total_minutes // (24 * 60)
+        rem = total_minutes % (24 * 60)
+        hours = rem // 60
+        minutes = rem % 60
 
-    # style like your screenshot: gray background + white grid
-    plt.style.use("ggplot")
+        parts = []
+        if days > 0:
+            parts.append(f"{days}d")
+        if hours > 0:
+            parts.append(f"{hours}h")
+        if minutes > 0 and days == 0:
+            parts.append(f"{minutes}m")
+        return "".join(parts) if parts else "0m"
 
-    fig, ax = plt.subplots(figsize=(10, 6), dpi=100)
+    def _interval_minutes_to_label(iv: pd.Interval) -> str:
+        left_lbl = _format_minutes_to_compact(iv.left)
+        right_lbl = _format_minutes_to_compact(iv.right)
+        return f"[{left_lbl}, {right_lbl})"
 
-    labels = dfp.index.astype(str).tolist()
-    values = dfp["corr"].values.astype(float)
+    x_labels = [_interval_minutes_to_label(iv) for iv in g["delay_bin"]]
 
-    ax.barh(labels, values)
+    # --- plot (ggplot background + white grid like your image) ---
+    with plt.style.context("ggplot"):
+        x = np.arange(len(g))
 
-    # correlation axis bounds
-    ax.set_xlim(-1, 1)
+        fig, ax = plt.subplots(figsize=figsize)
 
-    # vertical line at 0
-    ax.axvline(0, linewidth=1)
+        # Force BLUE (ggplot would otherwise start red/orange)
+        bars = ax.bar(x, g["volume"], alpha=0.4, color="tab:blue")
+        ax.set_ylabel("Volume")
 
-    ax.set_xlabel("correlation")
-    ax.set_title(title)
+        # bar labels
+        for i, b in enumerate(bars):
+            ax.text(
+                b.get_x() + b.get_width() / 2,
+                b.get_height(),
+                f"{int(g['volume'].iloc[i])}",
+                ha="center",
+                va="bottom",
+                fontsize=9
+            )
 
-    # grid style (white grid on gray background, like ggplot)
-    ax.grid(True, which="major", axis="both")
-    ax.grid(True, which="minor", axis="x", linewidth=0.5, alpha=0.35)
-    ax.minorticks_on()
+        # NPS line (BLUE)
+        ax2 = ax.twinx()
+        ax2.plot(x, g["nps"], marker="o", linewidth=2, color="tab:blue")
+        ax2.set_ylabel("NPS")
+        ax2.set_ylim(-100, 100)
 
-    # IMPORTANT: remove numeric annotations completely
-    # (we keep show_values param for compatibility, but we don't draw values)
-    # If you still want something here later (like rank numbers), tell me.
+        # ✅ Keep same “size/density” as when it was 25 by 25 (labels every 25)
+        ax2.yaxis.set_major_locator(MultipleLocator(25))
 
-    plt.tight_layout()
-    plt.show()
+        # ✅ But add “10 by 10” resolution (minor ticks/grid every 10)
+        ax2.yaxis.set_minor_locator(MultipleLocator(10))
+
+        # Grid styling (like your screenshot: clear horizontal grid)
+        ax.grid(True, axis="y", which="major", alpha=0.35)
+        ax2.grid(True, axis="y", which="minor", alpha=0.18)
+
+        ax.set_xticks(x)
+        ax.set_xticklabels(x_labels, rotation=30, ha="right")
+        ax.set_xlabel(f"{delay_col} (bins in minutes, displayed compactly)")
+
+        if title is None:
+            title = f"NPS et Volume par {delay_col}"
+        ax.set_title(title)
+
+        plt.tight_layout()
+        plt.show()
+
+    return g
+
 ```
