@@ -1,14 +1,16 @@
 ```
 import numpy as np
 import matplotlib.pyplot as plt
+import textwrap
 
 def plot_top_corr_bar(
     top_df,
     title="Top correlations with target",
     show_values=True,
     figsize=(10, 6),
-    max_label_len=40,     # truncate long feature names
-    left_margin=0.38      # enough space for y labels (increase if needed)
+    max_label_len=35,          # hard truncate
+    wrap_width=None,           # e.g. 18 to wrap labels; None = no wrap
+    dpi=100,                   # safe dpi
 ):
     """
     top_df: DataFrame with column 'corr' and index = feature names
@@ -16,23 +18,28 @@ def plot_top_corr_bar(
 
     if top_df is None or len(top_df) == 0:
         print("No data to plot.")
-        return
+        return None
 
-    # sort so bars are ordered (negative -> positive)
     d = top_df.sort_values("corr").copy()
 
-    # make safe, short labels (prevents huge canvas in notebook rendering)
-    raw_labels = d.index.astype(str).tolist()
+    # ---- SAFE LABELS (prevents huge image)
+    labels = d.index.astype(str).tolist()
+
+    # optional wrap (useful if you don't want truncation)
+    if wrap_width is not None:
+        labels = ["\n".join(textwrap.wrap(s, width=wrap_width)) for s in labels]
+
+    # hard truncate (always)
     labels = [
         (s if len(s) <= max_label_len else s[: max_label_len - 1] + "…")
-        for s in raw_labels
+        for s in labels
     ]
 
-    vals = d["corr"].astype(float).values
-    y = np.arange(len(d))
+    vals = d["corr"].astype(float).to_numpy()
+    y = np.arange(len(vals))
 
-    fig, ax = plt.subplots(figsize=figsize)
-
+    # ---- SAFE FIGURE RENDERING
+    fig, ax = plt.subplots(figsize=figsize, dpi=dpi)
     ax.barh(y, vals)
     ax.set_yticks(y)
     ax.set_yticklabels(labels)
@@ -48,9 +55,15 @@ def plot_top_corr_bar(
             ha = "left" if v >= 0 else "right"
             ax.text(x, yi, f"{v:.3f}", va="center", ha=ha, fontsize=9)
 
-    # IMPORTANT: avoid tight_layout() here (it can blow up image size in notebooks)
-    fig.subplots_adjust(left=left_margin, right=0.98, top=0.90, bottom=0.12)
+    # DON'T use tight_layout (can explode size in notebooks)
+    fig.subplots_adjust(left=0.35, right=0.98, top=0.90, bottom=0.12)
+
+    # Important: render without bbox_inches="tight" behavior
+    fig.set_constrained_layout(False)
 
     plt.show()
+    return fig
+
+
 
 ```
