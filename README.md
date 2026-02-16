@@ -1,391 +1,453 @@
 ```
-Below is a complete, practical documentation for using Random Forest Regression in Python on a pandas DataFrame: from data loading → cleaning → splitting → training → hyperparameters → evaluation (many metrics + cross-validation) → interpretation → saving/loading.
+Below is a full, practical documentation (same style as before) for:
+	1.	Encoding categorical + numeric data for ML training (on a pandas DataFrame)
+	2.	Handling imbalanced target data (classification) with strong, real-world techniques + parameters explained
 
 ⸻
 
-1) What is Random Forest Regression?
+Part A — Encoding & Preprocessing for ML (DataFrame → model-ready)
 
-RandomForestRegressor is an ensemble model that trains many decision trees on different random subsets of:
-	•	rows (bootstrap samples),
-	•	and features (random feature selection at each split),
+1) Goal: build a clean X matrix for scikit-learn
 
-Then it predicts by taking the average of all tree predictions.
-
-Why it’s useful
-	•	Works well on tabular data
-	•	Handles non-linear relationships
-	•	Robust to outliers/noise
-	•	Minimal feature scaling needed
+Most ML models require a numeric matrix:
+	•	categorical → encoded (one-hot / ordinal / target encoding)
+	•	numeric → impute missing + optionally scale
+	•	keep everything in a single pipeline to avoid leakage
 
 ⸻
 
-2) Installation & Imports
-
-pip install pandas numpy scikit-learn matplotlib joblib
+2) Split features by type (pandas)
 
 import numpy as np
 import pandas as pd
 
-from sklearn.model_selection import train_test_split, KFold, cross_val_score, cross_val_predict, RandomizedSearchCV, GridSearchCV
-from sklearn.ensemble import RandomForestRegressor
+def split_columns(df, target_col):
+    X = df.drop(columns=[target_col]).copy()
+    y = df[target_col].copy()
 
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_squared_error,
-    r2_score,
-    explained_variance_score,
-    mean_absolute_percentage_error,
-    median_absolute_error
-)
-
-from sklearn.inspection import permutation_importance
-import matplotlib.pyplot as plt
-import joblib
+    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+    cat_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
+    return X, y, num_cols, cat_cols
 
 
 ⸻
 
-3) Load Data into a DataFrame
+3) Recommended approach: ColumnTransformer + Pipeline
 
-Example (CSV)
+This is the best practice because it:
+	•	applies transforms only on train folds (no leakage)
+	•	keeps consistent columns between train/test
+	•	works with CV + hyperparameter search cleanly
+
+3.1 Minimal robust preprocessing (impute + one-hot)
+
+from sklearn.model_selection import train_test_split
+from sklearn.compose import ColumnTransformer
+from sklearn.pipeline import Pipeline
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import OneHotEncoder
+from sklearn.preprocessing import StandardScaler
+
+def make_preprocessor(num_cols, cat_cols, scale_numeric=False):
+    # numeric pipeline
+    num_steps = [
+        ("imputer", SimpleImputer(strategy="median"))
+    ]
+    if scale_numeric:
+        # useful for linear models / SVM / kNN / neural nets
+        num_steps.append(("scaler", StandardScaler()))
+
+    num_pipe = Pipeline(steps=num_steps)
+
+    # categorical pipeline
+    cat_pipe = Pipeline(steps=[
+        ("imputer", SimpleImputer(strategy="most_frequent")),
+        ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False))
+    ])
+
+    preprocessor = ColumnTransformer(
+        transformers=[
+            ("num", num_pipe, num_cols),
+            ("cat", cat_pipe, cat_cols),
+        ],
+        remainder="drop",  # ignore other columns
+        verbose_feature_names_out=False
+    )
+    return preprocessor
+
+Key parameters explained
+
+SimpleImputer
+	•	strategy="median": robust to outliers for numeric
+	•	strategy="most_frequent": common baseline for categorical
+
+OneHotEncoder
+	•	handle_unknown="ignore": unseen category at test time won’t crash; it becomes all zeros
+	•	sparse_output=False: returns dense array (easier to inspect). For big data, set True.
+
+StandardScaler
+	•	transforms numeric columns to zero-mean/unit-variance
+	•	not needed for tree-based models, but important for distance/linear models
+
+⸻
+
+4) Fit preprocessing on a DataFrame + train a model (end-to-end)
+
+Example with a classifier (works same for regression models too):
+
+from sklearn.linear_model import LogisticRegression
+from sklearn.metrics import classification_report
 
 df = pd.read_csv("data.csv")
-print(df.shape)
-print(df.head())
-
-
-⸻
-
-4) Decide your target and features
-
-Let’s assume your target column is named "target".
-
 TARGET = "target"
 
-X = df.drop(columns=[TARGET])
-y = df[TARGET]
-
-
-⸻
-
-5) Cleaning & Preprocessing (DataFrame-friendly)
-
-5.1 Handle missing values (simple baseline)
-
-Random Forest in scikit-learn does not accept NaNs (in most versions/configs), so fill or impute:
-
-# numeric columns
-num_cols = X.select_dtypes(include=[np.number]).columns
-X[num_cols] = X[num_cols].fillna(X[num_cols].median())
-
-# categorical columns (if any)
-cat_cols = X.select_dtypes(exclude=[np.number]).columns
-X[cat_cols] = X[cat_cols].fillna("missing")
-
-5.2 Encode categorical columns
-
-RandomForestRegressor needs numeric inputs.
-
-Option A: One-hot encoding (recommended baseline)
-
-X = pd.get_dummies(X, columns=cat_cols, drop_first=True)
-
-Note: scaling (StandardScaler) is usually not needed for random forests.
-
-⸻
-
-6) Train/Test Split
+X, y, num_cols, cat_cols = split_columns(df, TARGET)
 
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
-    test_size=0.2,
+    X, y, test_size=0.2, random_state=42, stratify=y
+)
+
+preprocessor = make_preprocessor(num_cols, cat_cols, scale_numeric=True)
+
+model = LogisticRegression(max_iter=2000)
+
+clf = Pipeline(steps=[
+    ("prep", preprocessor),
+    ("model", model)
+])
+
+clf.fit(X_train, y_train)
+pred = clf.predict(X_test)
+
+print(classification_report(y_test, pred))
+
+
+⸻
+
+5) Other encoding strategies (when to use)
+
+5.1 Ordinal Encoding (ordered categories)
+
+Use when categories are truly ordered, e.g. ["low","medium","high"].
+
+from sklearn.preprocessing import OrdinalEncoder
+
+cat_pipe_ordinal = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("ord", OrdinalEncoder(
+        handle_unknown="use_encoded_value",
+        unknown_value=-1
+    ))
+])
+
+Parameters
+	•	handle_unknown="use_encoded_value": allows unseen categories
+	•	unknown_value=-1: unseen categories mapped to -1 (safe)
+
+Warning: don’t use ordinal encoding for non-ordered categories: it injects fake numeric meaning.
+
+⸻
+
+5.2 Target Encoding (high-cardinality categories)
+
+Useful when you have columns like:
+	•	city (thousands of values)
+	•	customer_id (very high)
+
+One-hot would explode the feature space. Target encoding replaces each category by the mean target (with smoothing).
+Best done with a dedicated library (and done inside CV to avoid leakage).
+
+Recommended lib: category_encoders
+
+pip install category_encoders
+
+import category_encoders as ce
+from sklearn.pipeline import Pipeline
+
+cat_pipe_target = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("te", ce.TargetEncoder(
+        cols=cat_cols,
+        smoothing=10.0,
+        min_samples_leaf=20
+    ))
+])
+
+Parameters
+	•	smoothing: higher = more shrinkage to global mean (reduces overfit)
+	•	min_samples_leaf: categories with few samples get stronger shrinkage
+
+⸻
+
+6) Get feature names after encoding (very useful)
+
+prep = clf.named_steps["prep"]
+feature_names = prep.get_feature_names_out()
+print(len(feature_names))
+print(feature_names[:30])
+
+
+⸻
+
+Part B — Handling Imbalanced Target Data (Classification)
+
+Imbalanced target = one class is rare (fraud, churn, disease, defect).
+If you evaluate only with accuracy, you can get misleading results.
+
+1) Correct evaluation for imbalanced classification
+
+1.1 Use these metrics (recommended)
+	•	Precision: among predicted positives, how many are correct?
+	•	Recall: among true positives, how many did we catch?
+	•	F1: balance precision & recall
+	•	ROC-AUC: ranking quality (can be optimistic in extreme imbalance)
+	•	PR-AUC (Average Precision): often better for rare positives
+	•	Balanced Accuracy: average recall across classes
+
+from sklearn.metrics import (
+    classification_report,
+    confusion_matrix,
+    roc_auc_score,
+    average_precision_score
+)
+
+proba = clf.predict_proba(X_test)[:, 1]
+pred = clf.predict(X_test)
+
+print(confusion_matrix(y_test, pred))
+print(classification_report(y_test, pred))
+
+print("ROC-AUC:", roc_auc_score(y_test, proba))
+print("PR-AUC :", average_precision_score(y_test, proba))
+
+
+⸻
+
+2) Technique 1: Use class weights (strong baseline)
+
+Many models support weighting minority class higher.
+
+Logistic Regression / SVM / Trees:
+
+from sklearn.linear_model import LogisticRegression
+
+model = LogisticRegression(
+    max_iter=2000,
+    class_weight="balanced"
+)
+
+Parameters
+	•	class_weight="balanced": weights inversely proportional to class frequency
+	•	or custom: class_weight={0:1, 1:5}
+
+Pros
+	•	No synthetic data
+	•	Works very well as baseline
+
+Cons
+	•	May reduce precision if pushed too hard toward recall
+
+⸻
+
+3) Technique 2: Resampling (SMOTE / under-sampling) with imblearn
+
+Install:
+
+pip install imbalanced-learn
+
+IMPORTANT: resample inside pipeline only
+
+Otherwise you leak information into test/CV.
+
+from imblearn.pipeline import Pipeline as ImbPipeline
+from imblearn.over_sampling import SMOTE
+from sklearn.ensemble import RandomForestClassifier
+
+preprocessor = make_preprocessor(num_cols, cat_cols, scale_numeric=False)
+
+smote = SMOTE(
+    sampling_strategy=0.5,
+    k_neighbors=5,
     random_state=42
 )
-print(X_train.shape, X_test.shape)
 
-
-⸻
-
-7) Train a Random Forest Regressor
-
-7.1 Basic model
-
-rf = RandomForestRegressor(
-    n_estimators=300,
-    random_state=42,
-    n_jobs=-1
-)
-rf.fit(X_train, y_train)
-
-7.2 Predict
-
-y_pred = rf.predict(X_test)
-
-
-⸻
-
-8) Training Hyperparameters (ALL important ones explained)
-
-Below are the most used parameters and what they do:
-
-Forest-level
-	•	n_estimators: number of trees. More trees → usually better but slower.
-	•	random_state: reproducibility.
-	•	n_jobs: CPU parallelism (-1 = use all cores).
-	•	bootstrap: sample rows with replacement (default True). If False, each tree uses all rows (less randomness).
-	•	oob_score: “out-of-bag” score; internal validation if bootstrap=True.
-
-Tree complexity / overfitting control
-	•	max_depth: maximum tree depth. Smaller → less overfit.
-	•	min_samples_split: minimum samples required to split a node.
-	•	min_samples_leaf: minimum samples in a leaf. Increasing it smooths predictions.
-	•	max_leaf_nodes: limit leaf count.
-	•	min_impurity_decrease: split only if it improves impurity enough.
-
-Feature randomness
-	•	max_features: number of features considered at each split.
-	•	1.0 or None: all features
-	•	"sqrt": sqrt(num_features)
-	•	"log2": log2(num_features)
-	•	or a float (fraction) / int
-
-Split criterion
-	•	criterion: regression objective:
-	•	"squared_error" (default) → MSE
-	•	"absolute_error" → MAE (more robust to outliers, slower)
-	•	"friedman_mse" often good for boosting-like splits
-	•	"poisson" for count-like targets (only if y >= 0)
-
-⸻
-
-9) Evaluation Metrics (and how to apply)
-
-9.1 Core regression metrics
-
-def regression_report(y_true, y_pred):
-    mae = mean_absolute_error(y_true, y_pred)
-    mse = mean_squared_error(y_true, y_pred)
-    rmse = np.sqrt(mse)
-    r2 = r2_score(y_true, y_pred)
-    evs = explained_variance_score(y_true, y_pred)
-    mape = mean_absolute_percentage_error(y_true, y_pred)
-    medae = median_absolute_error(y_true, y_pred)
-
-    return {
-        "MAE": mae,
-        "MSE": mse,
-        "RMSE": rmse,
-        "R2": r2,
-        "ExplainedVariance": evs,
-        "MAPE": mape,
-        "MedianAE": medae,
-    }
-
-report = regression_report(y_test, y_pred)
-print(pd.Series(report).sort_index())
-
-9.2 What each metric means
-	•	MAE: average absolute error. Easy to interpret (same unit as target).
-	•	MSE: squares errors, punishes large errors strongly.
-	•	RMSE: sqrt(MSE), same unit as target, sensitive to big errors.
-	•	R²: how much variance is explained (1.0 best, can be negative).
-	•	Explained Variance: like R² but focuses on variance of errors.
-	•	MAPE: percentage error; can explode if y is near 0.
-	•	MedianAE: robust to outliers (median absolute error).
-
-⸻
-
-10) Cross-Validation (Better evaluation)
-
-Instead of one split, use K-fold CV.
-
-10.1 Cross-validated R²
-
-cv = KFold(n_splits=5, shuffle=True, random_state=42)
-
-cv_r2 = cross_val_score(
-    rf, X, y,
-    cv=cv,
-    scoring="r2",
-    n_jobs=-1
-)
-print("CV R2 mean:", cv_r2.mean())
-print("CV R2 std :", cv_r2.std())
-
-10.2 Cross-validated MAE (note: sklearn uses NEGATIVE for errors)
-
-cv_neg_mae = cross_val_score(
-    rf, X, y,
-    cv=cv,
-    scoring="neg_mean_absolute_error",
-    n_jobs=-1
-)
-cv_mae = -cv_neg_mae
-print("CV MAE mean:", cv_mae.mean())
-print("CV MAE std :", cv_mae.std())
-
-10.3 Cross-validated predictions (for diagnostics plots)
-
-y_cv_pred = cross_val_predict(rf, X, y, cv=cv, n_jobs=-1)
-
-
-⸻
-
-11) Hyperparameter Tuning (RandomizedSearch + GridSearch)
-
-11.1 RandomizedSearchCV (recommended first)
-
-param_dist = {
-    "n_estimators": [200, 400, 800],
-    "max_depth": [None, 5, 10, 20, 40],
-    "min_samples_split": [2, 5, 10],
-    "min_samples_leaf": [1, 2, 4, 8],
-    "max_features": ["sqrt", "log2", 0.5, 1.0],
-    "bootstrap": [True, False],
-}
-
-rf_base = RandomForestRegressor(random_state=42, n_jobs=-1)
-
-search = RandomizedSearchCV(
-    estimator=rf_base,
-    param_distributions=param_dist,
-    n_iter=30,
-    scoring="neg_mean_absolute_error",
-    cv=5,
+model = RandomForestClassifier(
+    n_estimators=400,
     random_state=42,
     n_jobs=-1,
-    verbose=1
+    class_weight=None
 )
 
-search.fit(X_train, y_train)
+pipe = ImbPipeline(steps=[
+    ("prep", preprocessor),
+    ("smote", smote),
+    ("model", model)
+])
 
-best_model = search.best_estimator_
-print("Best params:", search.best_params_)
+pipe.fit(X_train, y_train)
+pred = pipe.predict(X_test)
+print(classification_report(y_test, pred))
 
-11.2 Evaluate tuned model
+SMOTE parameters explained
+	•	sampling_strategy
+	•	float like 0.5: after resampling, minority count becomes 0.5 × majority
+	•	"auto": balance fully (minority = majority)
+	•	dict {minority_label: desired_count}
+	•	k_neighbors
+	•	number of neighbors used to create synthetic samples
+	•	small minority class? lower it (e.g. 3)
+	•	random_state: reproducibility
 
-y_pred_best = best_model.predict(X_test)
-print(pd.Series(regression_report(y_test, y_pred_best)))
+Pros
+	•	Can improve recall significantly
 
+Cons
+	•	Can create unrealistic synthetic points, especially with messy categorical variables
+(for mixed numeric/categorical, prefer SMOTENC)
 
 ⸻
 
-12) Feature Importance (2 ways)
+4) Technique 3: SMOTENC for mixed data (categorical + numeric)
 
-12.1 Built-in importance (fast, can be biased)
+If you have categorical features and you one-hot too early, SMOTE can behave poorly.
+Use SMOTENC with categorical indices (before one-hot).
 
-importances = pd.Series(rf.feature_importances_, index=X.columns).sort_values(ascending=False)
-print(importances.head(20))
+This requires a slightly different preprocessing approach (ordinal encode categories first).
+Here’s a clean template:
 
-12.2 Permutation importance (more reliable)
+from sklearn.preprocessing import OrdinalEncoder
+from imblearn.over_sampling import SMOTENC
 
-perm = permutation_importance(
-    rf, X_test, y_test,
-    n_repeats=10,
-    random_state=42,
+# ordinal encode cats (temporary numeric codes)
+cat_pipe = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("ord", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1))
+])
+
+num_pipe = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="median"))
+])
+
+pre_smote_prep = ColumnTransformer(
+    transformers=[
+        ("num", num_pipe, num_cols),
+        ("cat", cat_pipe, cat_cols)
+    ],
+    remainder="drop"
+)
+
+# indices of categorical columns AFTER transformer:
+cat_indices = list(range(len(num_cols), len(num_cols) + len(cat_cols)))
+
+smote_nc = SMOTENC(
+    categorical_features=cat_indices,
+    sampling_strategy=0.5,
+    k_neighbors=5,
+    random_state=42
+)
+
+model = RandomForestClassifier(n_estimators=400, random_state=42, n_jobs=-1)
+
+pipe = ImbPipeline(steps=[
+    ("prep", pre_smote_prep),
+    ("smote", smote_nc),
+    ("model", model)
+])
+
+pipe.fit(X_train, y_train)
+pred = pipe.predict(X_test)
+print(classification_report(y_test, pred))
+
+SMOTENC parameters explained
+	•	categorical_features: list of indices for categorical columns
+	•	others same as SMOTE
+
+⸻
+
+5) Technique 4: Under-sampling (when you have huge data)
+
+from imblearn.under_sampling import RandomUnderSampler
+
+rus = RandomUnderSampler(
+    sampling_strategy=0.8,
+    random_state=42
+)
+
+pipe = ImbPipeline(steps=[
+    ("prep", preprocessor),
+    ("under", rus),
+    ("model", LogisticRegression(max_iter=2000, class_weight=None))
+])
+
+Parameters
+	•	sampling_strategy=0.8: minority becomes 0.8× majority (after under-sampling majority)
+
+Pros
+	•	Fast
+	•	Avoids synthetic points
+
+Cons
+	•	You throw away data (can hurt performance)
+
+⸻
+
+6) Technique 5: Threshold tuning (very important)
+
+Most models output probabilities. Default threshold is 0.5, which is often wrong for imbalance.
+
+from sklearn.metrics import precision_recall_curve
+
+proba = pipe.predict_proba(X_test)[:, 1]
+precision, recall, thresholds = precision_recall_curve(y_test, proba)
+
+# Example: choose threshold achieving recall >= 0.85 (business constraint)
+target_recall = 0.85
+idx = np.where(recall >= target_recall)[0][-1]
+best_threshold = thresholds[idx] if idx < len(thresholds) else 0.5
+
+pred_custom = (proba >= best_threshold).astype(int)
+
+print("Chosen threshold:", best_threshold)
+print(classification_report(y_test, pred_custom))
+
+Why this matters
+	•	You can explicitly choose recall vs precision tradeoff based on business needs.
+
+⸻
+
+7) Recommended “best practice” recipe (real-world)
+	1.	Split with stratify=y
+	2.	Use a pipeline (ColumnTransformer + model)
+	3.	Start with class_weight="balanced" baseline
+	4.	Evaluate with PR-AUC, F1, recall/precision
+	5.	Add SMOTE/SMOTENC if needed
+	6.	Tune threshold to hit business targets (e.g., recall ≥ 90%)
+	7.	Validate with stratified CV
+
+⸻
+
+8) Stratified Cross-Validation for imbalanced classification
+
+from sklearn.model_selection import StratifiedKFold, cross_val_score
+
+skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+scores = cross_val_score(
+    pipe, X, y,
+    cv=skf,
+    scoring="average_precision",  # PR-AUC
     n_jobs=-1
 )
-
-perm_imp = pd.Series(perm.importances_mean, index=X.columns).sort_values(ascending=False)
-print(perm_imp.head(20))
+print("CV PR-AUC mean:", scores.mean(), "std:", scores.std())
 
 
 ⸻
 
-13) Diagnostics Plots (Actual vs Predicted + Residuals)
+If you tell me:
+	•	your target column name,
+	•	which column(s) are categorical,
+	•	and whether your task is classification or regression,
 
-def plot_actual_vs_pred(y_true, y_pred, title="Actual vs Predicted"):
-    plt.figure()
-    plt.scatter(y_true, y_pred)
-    plt.xlabel("Actual")
-    plt.ylabel("Predicted")
-    plt.title(title)
-    plt.grid(True)
-    plt.show()
-
-def plot_residuals(y_true, y_pred, title="Residuals"):
-    residuals = y_true - y_pred
-    plt.figure()
-    plt.scatter(y_pred, residuals)
-    plt.axhline(0)
-    plt.xlabel("Predicted")
-    plt.ylabel("Residual (Actual - Predicted)")
-    plt.title(title)
-    plt.grid(True)
-    plt.show()
-
-plot_actual_vs_pred(y_test, y_pred, "RF: Actual vs Predicted (Test)")
-plot_residuals(y_test, y_pred, "RF: Residuals (Test)")
-
-
-⸻
-
-14) Save & Load the model
-
-joblib.dump(rf, "random_forest_model.joblib")
-
-rf_loaded = joblib.load("random_forest_model.joblib")
-pred = rf_loaded.predict(X_test)
-
-
-⸻
-
-15) Full End-to-End Template (Copy/Paste)
-
-import numpy as np
-import pandas as pd
-from sklearn.model_selection import train_test_split, KFold, cross_val_score, RandomizedSearchCV
-from sklearn.ensemble import RandomForestRegressor
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-import joblib
-
-# 1) Load
-df = pd.read_csv("data.csv")
-
-# 2) Target + features
-TARGET = "target"
-X = df.drop(columns=[TARGET]).copy()
-y = df[TARGET].copy()
-
-# 3) Missing values
-num_cols = X.select_dtypes(include=[np.number]).columns
-cat_cols = X.select_dtypes(exclude=[np.number]).columns
-
-X[num_cols] = X[num_cols].fillna(X[num_cols].median())
-X[cat_cols] = X[cat_cols].fillna("missing")
-
-# 4) Encode
-X = pd.get_dummies(X, columns=cat_cols, drop_first=True)
-
-# 5) Split
-X_train, X_test, y_train, y_test = train_test_split(X, y, test_size=0.2, random_state=42)
-
-# 6) Train baseline
-rf = RandomForestRegressor(n_estimators=300, random_state=42, n_jobs=-1)
-rf.fit(X_train, y_train)
-
-# 7) Evaluate
-y_pred = rf.predict(X_test)
-mae = mean_absolute_error(y_test, y_pred)
-rmse = np.sqrt(mean_squared_error(y_test, y_pred))
-r2 = r2_score(y_test, y_pred)
-
-print({"MAE": mae, "RMSE": rmse, "R2": r2})
-
-# 8) Cross-val
-cv = KFold(n_splits=5, shuffle=True, random_state=42)
-cv_r2 = cross_val_score(rf, X, y, cv=cv, scoring="r2", n_jobs=-1)
-print("CV R2 mean:", cv_r2.mean(), "std:", cv_r2.std())
-
-# 9) Save
-joblib.dump(rf, "rf.joblib")
-
-
-⸻
-
-If you paste a small sample of your DataFrame columns (like df.head() + target name), I can tailor:
-	•	the preprocessing (encoding/imputation),
-	•	the tuning space (ranges that make sense),
-	•	and the evaluation report (your preferred metrics like MAE vs RMSE vs MAPE).
+I can give you a single final ready-to-run script tailored to your DataFrame (best preprocessing + best imbalance strategy).
 
 ```
