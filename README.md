@@ -1,44 +1,33 @@
+
+
 ```
 
-Below is a full, detailed documentation (practical + copy-paste code) for training a model that predicts Satisfaction (0→10) from a pandas DataFrame using:
-	•	Categorical encoding (OneHotEncoder + alternatives)
-	•	Numeric preprocessing (missing values, optional scaling)
-	•	Random Forest Regression (with all key hyperparameters explained)
-	•	Imbalanced target handling for regression (rare scores don’t get ignored)
-	•	Evaluation techniques (what each metric/plot shows + how to interpret)
-	•	Predicting from a dictionary (you type the input yourself and test results)
 
-Everything is built as a single Pipeline so preprocessing is consistent at training + prediction.
+Below is the same full documentation, but no custom functions at all. It’s written as a step-by-step notebook style script so you can read it line by line and understand exactly what happens.
 
-⸻
-
-0) Important note: “imbalance” for regression
-
-Imbalance for regression means: some target values are rare (e.g., very few 0/1 or 10), so the model might learn mostly the common values and perform poorly on rare extremes.
-
-Good solutions:
-	1.	Stratified split via target binning (so train/test both contain rare ranges)
-	2.	Sample weights (give rare target ranges more importance during training)
-	3.	(Optional) Upsampling rare target ranges in training data
-
-Random Forest supports sample_weight in .fit() → very useful.
+The example goal: predict satisfaction (0..10) from a DataFrame with numeric + categorical features, using:
+	•	OneHotEncoding for categorical data
+	•	Imputation for missing values
+	•	RandomForestRegressor with many hyperparameters shown
+	•	Imbalanced target handling (regression) via target binning + sample weights
+	•	Evaluation metrics + plots + CV
+	•	Prediction from a dictionary
 
 ⸻
 
-1) Setup (install + imports)
-
-pip install pandas numpy scikit-learn matplotlib joblib
+1) Imports
 
 import numpy as np
 import pandas as pd
 
-from sklearn.model_selection import train_test_split, KFold, cross_val_predict, cross_val_score
+from sklearn.model_selection import train_test_split, KFold, cross_val_predict
 from sklearn.compose import ColumnTransformer
 from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
 from sklearn.ensemble import RandomForestRegressor
+
 from sklearn.metrics import (
     mean_absolute_error,
     mean_squared_error,
@@ -50,482 +39,392 @@ from sklearn.metrics import (
 
 from sklearn.inspection import permutation_importance
 import matplotlib.pyplot as plt
+
 import joblib
 
 
 ⸻
 
-2) Choose target + split columns (DataFrame → X, y)
+2) Load your data
 
-TARGET = "satisfaction"  # 0..10
+df = pd.read_csv("data.csv")
 
-def split_columns(df, target_col):
-    X = df.drop(columns=[target_col]).copy()
-    y = df[target_col].copy()
+# Example target column
+TARGET = "satisfaction"  # should be 0..10
 
-    num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
-    cat_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
-    return X, y, num_cols, cat_cols
+print(df.shape)
+print(df.head())
 
 
 ⸻
 
-3) Encoding categorical + preprocessing numeric (BEST PRACTICE)
+3) Separate X and y (features / target)
 
-3.1 Recommended: OneHotEncoder + imputers (pipeline-safe)
+X = df.drop(columns=[TARGET]).copy()
+y = df[TARGET].copy()
 
-def make_preprocessor(num_cols, cat_cols, scale_numeric=False):
-    # Numeric features: impute missing; optionally scale (not needed for forests)
-    num_steps = [("imputer", SimpleImputer(strategy="median"))]
-    if scale_numeric:
-        num_steps.append(("scaler", StandardScaler()))
-    num_pipe = Pipeline(steps=num_steps)
-
-    # Categorical: impute missing + OneHot encode
-    cat_pipe = Pipeline(steps=[
-        ("imputer", SimpleImputer(strategy="most_frequent")),
-        ("onehot", OneHotEncoder(
-            handle_unknown="ignore",
-            sparse_output=False
-        ))
-    ])
-
-    preprocessor = ColumnTransformer(
-        transformers=[
-            ("num", num_pipe, num_cols),
-            ("cat", cat_pipe, cat_cols),
-        ],
-        remainder="drop",
-        verbose_feature_names_out=False
-    )
-    return preprocessor
-
-Hyperparameters explained (preprocessing)
-
-SimpleImputer
-	•	strategy="median": robust for numeric (outliers won’t distort like mean)
-	•	strategy="most_frequent": best simple default for categories
-
-OneHotEncoder
-	•	handle_unknown="ignore": if you type a new category later (not seen in training), prediction still works (it becomes all-zeros for that category column)
-	•	sparse_output=False: easier to debug; for huge datasets you can set it to True (saves memory)
-
-StandardScaler
-	•	useful for linear models / SVM / kNN
-	•	not required for tree models (RandomForest), but you can keep it off
 
 ⸻
 
-3.2 Alternative encodings (when OneHot isn’t ideal)
+4) Detect numeric vs categorical columns
 
-A) Ordinal encoding (ONLY if categories are truly ordered)
+num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
+cat_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
 
-Example: ["low","medium","high"].
-For unordered categories (city names), ordinal encoding is usually wrong.
+print("Numeric columns:", num_cols)
+print("Categorical columns:", cat_cols)
 
-B) Target encoding (best for high-cardinality like 5k cities)
-
-Replaces each category by a smoothed mean target. Powerful but must be done carefully (avoid leakage).
-If you want this, tell me and I’ll give you a leak-safe CV version.
-
-For your request, we’ll use OneHotEncoder because it’s safest and standard.
 
 ⸻
 
-4) Handling imbalanced target (regression) properly
+5) Handle “imbalanced regression target” BEFORE split (stratified split using bins)
 
-4.1 Stratified split using target bins (recommended)
+Why?
 
-train_test_split has stratify= only for classification, so we bin the target.
+If satisfaction values are not uniformly distributed (ex: many 7–9, few 0–2), a random split might put almost all rare values in train OR test, which makes evaluation misleading.
 
-def make_target_bins(y, n_bins=6):
-    # Quantile bins: each bin has (roughly) same number of samples
-    # Good when you have imbalance across ranges.
-    bins = pd.qcut(y, q=n_bins, duplicates="drop")
-    return bins
+We create bins from the target using quantiles.
 
-Then:
+# Create target bins for stratified splitting
+# q = number of bins; 6 is a good start
+y_bins = pd.qcut(y, q=6, duplicates="drop")
+print(y_bins.value_counts())
 
-X, y, num_cols, cat_cols = split_columns(df, TARGET)
-y_bins = make_target_bins(y, n_bins=6)
+Now do a stratified split using these bins:
 
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
+X_train, X_test, y_train, y_test, bins_train, bins_test = train_test_split(
+    X, y, y_bins,
     test_size=0.2,
     random_state=42,
     stratify=y_bins
 )
 
-What it shows / why it matters
-	•	Ensures your test set contains examples from rare satisfaction ranges (0–2, 9–10, etc.)
-	•	Prevents “easy” splits where test contains only common values
+print("Train size:", X_train.shape, "Test size:", X_test.shape)
+print("Train bin distribution:\n", bins_train.value_counts(normalize=True))
+print("Test bin distribution:\n", bins_test.value_counts(normalize=True))
+
 
 ⸻
 
-4.2 Sample weights to “rebalance” rare target ranges (recommended)
+6) Compute sample weights on training set (to help rare target ranges)
 
-We compute bin frequencies and give higher weight to rare bins.
+Idea
 
-def compute_sample_weights(y, n_bins=6):
-    bins = pd.qcut(y, q=n_bins, duplicates="drop")
-    freq = bins.value_counts(normalize=True)
-    weights = bins.map(lambda b: 1.0 / freq[b]).astype(float)
-    # Normalize weights so average weight ~ 1 (optional)
-    weights = weights / weights.mean()
-    return weights.values
+We want rare bins to matter more. Weight = inverse frequency of the bin.
 
-Usage:
+# Frequency of each bin in TRAIN
+bin_freq = bins_train.value_counts(normalize=True)
 
-train_weights = compute_sample_weights(y_train, n_bins=6)
+# Weight each row by 1 / freq(bin)
+train_weights = bins_train.map(lambda b: 1.0 / bin_freq[b]).astype(float).values
 
-What it does
-	•	Rare target ranges contribute more to the loss reduction decisions in trees
-	•	Helps model not ignore rare satisfaction extremes
+# Normalize weights so average weight ~ 1 (optional)
+train_weights = train_weights / train_weights.mean()
 
-⸻
+print("Weights summary:", np.min(train_weights), np.mean(train_weights), np.max(train_weights))
 
-4.3 Optional: Upsampling rare target ranges (alternative)
-
-This duplicates training rows from rare bins to balance counts.
-
-Sample weights is usually cleaner than duplication, but if you want upsampling too, tell me.
+What this does
+	•	Rare satisfaction ranges (ex: low scores) get higher weights.
+	•	The forest tries harder to reduce error on them.
 
 ⸻
 
-5) Random Forest Regression — hyperparameters explained (in detail)
+7) Build preprocessing (no functions): numeric + categorical pipelines
 
-RandomForestRegressor is a collection of many decision trees. Hyperparameters control:
+7.1 Numeric pipeline
+	•	Fill missing numeric values with median
+	•	Scaling is optional for forests (not needed).
+I will not scale to keep it simple and correct for RF.
 
-5.1 “How many trees and randomness”
-	•	n_estimators: number of trees
-	•	More trees → better stability, but slower
-	•	Typical: 200–1000
-	•	random_state: reproducibility
-	•	n_jobs: CPU usage (-1 = all cores)
-	•	bootstrap: whether each tree trains on a bootstrap sample (default True)
-	•	True increases diversity and reduces overfitting
-	•	oob_score: “out-of-bag” scoring (only works if bootstrap=True)
-	•	Gives a built-in validation estimate without separate CV (still, CV is better)
+numeric_transformer = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="median"))
+])
 
-5.2 “Tree size / overfitting control”
-	•	max_depth: max depth of each tree
-	•	None = trees can grow deep (risk overfit)
-	•	smaller values generalize better
-	•	min_samples_split: minimum samples required to split a node
-	•	larger → fewer splits → less overfit
-	•	min_samples_leaf: minimum samples in a leaf
-	•	larger → smoother predictions, better generalization
-	•	max_leaf_nodes: limit number of leaf nodes
-	•	forces simpler trees
-	•	min_impurity_decrease: only split if it improves impurity by at least this amount
-	•	stronger regularization, good to reduce overfitting
+7.2 Categorical pipeline
+	•	Fill missing categories with most frequent
+	•	One-hot encode categories
+	•	handle_unknown=“ignore” lets you predict later even if you type a new category in a dictionary
 
-5.3 “Feature randomness”
-	•	max_features: number of features considered at each split
-	•	"sqrt", "log2", float fraction, integer count
-	•	More randomness often generalizes better, especially with many features from one-hot encoding
+categorical_transformer = Pipeline(steps=[
+    ("imputer", SimpleImputer(strategy="most_frequent")),
+    ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False))
+])
 
-5.4 “Split criterion”
-	•	criterion
-	•	"squared_error": optimizes MSE (common default)
-	•	"absolute_error": optimizes MAE (more robust to outliers, slower)
-	•	"friedman_mse": variant often used for boosting-like gains
+7.3 Combine them with ColumnTransformer
 
-5.5 “Other”
-	•	ccp_alpha: cost-complexity pruning strength
-	•	0 prunes the tree; helps reduce overfit (advanced)
-	•	max_samples (only if bootstrap=True): fraction/number of samples used per tree
-	•	smaller → more diversity, sometimes better generalization
-
-⸻
-
-6) Full training code (Pipeline + weights + full hyperparameters)
-
-def build_rf_model(num_cols, cat_cols):
-    preprocessor = make_preprocessor(num_cols, cat_cols, scale_numeric=False)
-
-    rf = RandomForestRegressor(
-        n_estimators=600,
-        criterion="squared_error",
-        max_depth=None,
-
-        min_samples_split=2,
-        min_samples_leaf=1,
-        min_weight_fraction_leaf=0.0,
-
-        max_features="sqrt",
-        max_leaf_nodes=None,
-        min_impurity_decrease=0.0,
-
-        bootstrap=True,
-        oob_score=False,      # set True if you want OOB estimate
-        max_samples=None,     # set e.g. 0.8 for more randomness
-
-        random_state=42,
-        n_jobs=-1,
-
-        ccp_alpha=0.0,
-        verbose=0
-    )
-
-    pipe = Pipeline(steps=[
-        ("prep", preprocessor),
-        ("model", rf)
-    ])
-    return pipe
-
-Train:
-
-df = pd.read_csv("data.csv")
-
-X, y, num_cols, cat_cols = split_columns(df, TARGET)
-
-y_bins = make_target_bins(y, n_bins=6)
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y, test_size=0.2, random_state=42, stratify=y_bins
+preprocessor = ColumnTransformer(
+    transformers=[
+        ("num", numeric_transformer, num_cols),
+        ("cat", categorical_transformer, cat_cols)
+    ],
+    remainder="drop",
+    verbose_feature_names_out=False
 )
 
-model = build_rf_model(num_cols, cat_cols)
 
-train_weights = compute_sample_weights(y_train, n_bins=6)
+⸻
 
-# IMPORTANT: in sklearn Pipeline, pass fit params with step name:
+8) RandomForestRegressor — put a lot of hyperparameters (and understand each)
+
+rf = RandomForestRegressor(
+    # --- Forest size / stability ---
+    n_estimators=600,        # number of trees (more = stable but slower)
+    random_state=42,         # reproducibility
+    n_jobs=-1,               # all CPU cores
+
+    # --- Split criterion ---
+    criterion="squared_error",  # MSE objective (default). Alternative: "absolute_error"
+
+    # --- Tree complexity (controls overfitting) ---
+    max_depth=None,          # None = trees grow deep (can overfit)
+    min_samples_split=2,     # min samples to split a node (bigger => less complex)
+    min_samples_leaf=1,      # min samples in leaf (bigger => smoother predictions)
+    max_leaf_nodes=None,     # limit leaf nodes (set int to simplify trees)
+    min_impurity_decrease=0.0, # require improvement to split (regularization)
+
+    # --- Feature randomness ---
+    max_features="sqrt",     # features considered at each split
+                             # "sqrt" often works well with many features (esp. one-hot)
+
+    # --- Row randomness ---
+    bootstrap=True,          # sample rows with replacement per tree
+    max_samples=None,        # if bootstrap=True, you can set e.g. 0.8 to use 80% per tree
+
+    # --- Other regularization ---
+    ccp_alpha=0.0,           # pruning strength (0 = no pruning)
+
+    # --- OOB (optional internal validation) ---
+    oob_score=False,         # works only if bootstrap=True
+)
+
+How to interpret these hyperparameters quickly
+	•	If model overfits (train great, test bad):
+increase min_samples_leaf, reduce max_depth, set max_samples=0.8, or use ccp_alpha>0.
+	•	If model underfits (both train & test bad):
+increase n_estimators, allow deeper trees (max_depth=None), reduce min_samples_leaf.
+
+⸻
+
+9) Build the full Pipeline (preprocess → model)
+
+model = Pipeline(steps=[
+    ("prep", preprocessor),
+    ("model", rf)
+])
+
+
+⸻
+
+10) Train the model using sample weights (important)
+
+In Pipeline, you pass weights like this: model__sample_weight.
+
 model.fit(X_train, y_train, model__sample_weight=train_weights)
+
+
+⸻
+
+11) Predict on test set
 
 y_pred = model.predict(X_test)
 
+Optional: keep predictions in [0,10]
+
+y_pred_clipped = np.clip(y_pred, 0, 10)
+
 
 ⸻
 
-7) Evaluation techniques (what they show + how to interpret)
+12) Evaluation metrics (what each shows)
 
-7.1 Metrics (numbers)
+mae = mean_absolute_error(y_test, y_pred_clipped)
+mse = mean_squared_error(y_test, y_pred_clipped)
+rmse = np.sqrt(mse)
+r2 = r2_score(y_test, y_pred_clipped)
+evs = explained_variance_score(y_test, y_pred_clipped)
+mape = mean_absolute_percentage_error(y_test, y_pred_clipped)
+medae = median_absolute_error(y_test, y_pred_clipped)
 
-def regression_report(y_true, y_pred):
-    mae = mean_absolute_error(y_true, y_pred)
-    mse = mean_squared_error(y_true, y_pred)
-    rmse = np.sqrt(mse)
-    r2 = r2_score(y_true, y_pred)
-    evs = explained_variance_score(y_true, y_pred)
-    mape = mean_absolute_percentage_error(y_true, y_pred)
-    medae = median_absolute_error(y_true, y_pred)
+print("MAE :", mae)
+print("MSE :", mse)
+print("RMSE:", rmse)
+print("R2  :", r2)
+print("ExplainedVariance:", evs)
+print("MAPE:", mape)
+print("MedianAE:", medae)
 
-    return {
-        "MAE": mae,
-        "MSE": mse,
-        "RMSE": rmse,
-        "R2": r2,
-        "ExplainedVariance": evs,
-        "MAPE": mape,
-        "MedianAE": medae
-    }
-
-print(pd.Series(regression_report(y_test, y_pred)).sort_index())
-
-What each metric shows
-
-MAE (Mean Absolute Error)
-	•	Average absolute error in the target unit (here: satisfaction points).
-	•	If MAE=0.6 → on average the model is off by 0.6 points.
-
-MSE (Mean Squared Error)
-	•	Squares errors → punishes big mistakes strongly.
-	•	Good when you really want to penalize large errors.
-
-RMSE
-	•	sqrt(MSE) in the same unit (satisfaction points).
-	•	Often easier to interpret than MSE and still punishes big errors.
-
-R²
-	•	How much variance in satisfaction is explained (1 is best).
-	•	R² can be negative if the model is worse than predicting the mean.
-
-Explained Variance
-	•	Similar to R², focuses on variance captured by the prediction.
-	•	If high but R² lower, it can indicate bias/offset.
-
-MAPE
-	•	Error as percentage.
-	•	Not great if target has zeros or near-zero values (can blow up). For 0..10 it can be unstable when y≈0.
-
-MedianAE
-	•	Median absolute error: robust to outliers.
-	•	If MAE is high but MedianAE is low → errors are usually small but sometimes very large.
+Interpretation
+	•	MAE: average error in satisfaction points. (best for “human scale”)
+	•	RMSE: punishes big errors. If RMSE >> MAE, you have some large mistakes.
+	•	R²: percent of variance explained. Negative means worse than predicting mean.
+	•	Explained Variance: similar to R²; helps detect offset vs variance capture.
+	•	MAPE: % error; not great near y=0.
+	•	MedianAE: typical error ignoring big outliers.
 
 ⸻
 
-7.2 Plots that explain model behavior
+13) Plots to understand behavior
 
-A) Actual vs Predicted (fit quality + bias)
+13.1 Actual vs Predicted
 
-def plot_actual_vs_pred(y_true, y_pred):
-    plt.figure()
-    plt.scatter(y_true, y_pred)
-    plt.xlabel("Actual satisfaction")
-    plt.ylabel("Predicted satisfaction")
-    plt.title("Actual vs Predicted")
-    plt.grid(True)
-    plt.show()
+Shows if model is biased or compressed (not predicting extremes).
 
-plot_actual_vs_pred(y_test, y_pred)
+plt.figure()
+plt.scatter(y_test, y_pred_clipped)
+plt.xlabel("Actual satisfaction")
+plt.ylabel("Predicted satisfaction")
+plt.title("Actual vs Predicted")
+plt.grid(True)
+plt.show()
 
-How to interpret
-	•	Points should align around the diagonal.
-	•	If predictions are compressed (e.g., never predicts 0 or 10), you’ll see “flattening”.
-	•	Systematic shift up/down = bias.
+Interpretation
+	•	Good model → points near diagonal
+	•	If it never predicts 0 or 10 → “compressed band” in the middle
 
-⸻
+13.2 Residuals vs Predicted
 
-B) Residual plot (detect patterns, nonlinearity, missing features)
+Residual = Actual − Predicted. Shows patterns and where it fails.
 
-Residual = Actual − Predicted
+residuals = y_test - y_pred_clipped
 
-def plot_residuals(y_true, y_pred):
-    residuals = y_true - y_pred
-    plt.figure()
-    plt.scatter(y_pred, residuals)
-    plt.axhline(0)
-    plt.xlabel("Predicted satisfaction")
-    plt.ylabel("Residual (Actual - Predicted)")
-    plt.title("Residuals vs Predicted")
-    plt.grid(True)
-    plt.show()
+plt.figure()
+plt.scatter(y_pred_clipped, residuals)
+plt.axhline(0)
+plt.xlabel("Predicted satisfaction")
+plt.ylabel("Residual (Actual - Predicted)")
+plt.title("Residuals vs Predicted")
+plt.grid(True)
+plt.show()
 
-plot_residuals(y_test, y_pred)
-
-How to interpret
-	•	Residuals should be randomly scattered around 0.
-	•	A curve pattern means model is missing structure (or needs different features).
-	•	Increasing spread for high predictions = heteroscedasticity (errors grow in some ranges).
+Interpretation
+	•	Random cloud around 0 is good
+	•	Pattern/curve means missing relationship/features
 
 ⸻
 
-C) Error by target range (checks “imbalance” fix worked)
+14) Error by target range (check imbalance fix)
 
-This is the most important for imbalanced regression.
+This tells you if rare satisfaction values still have high error.
 
-def error_by_bins(y_true, y_pred, n_bins=6):
-    df_err = pd.DataFrame({"y": y_true, "pred": y_pred})
-    df_err["bin"] = pd.qcut(df_err["y"], q=n_bins, duplicates="drop")
-    df_err["abs_err"] = (df_err["y"] - df_err["pred"]).abs()
+df_err = pd.DataFrame({
+    "y": y_test.values,
+    "pred": y_pred_clipped
+})
 
-    summary = df_err.groupby("bin").agg(
-        count=("y", "size"),
-        mae=("abs_err", "mean")
-    ).reset_index()
+df_err["bin"] = pd.qcut(df_err["y"], q=6, duplicates="drop")
+df_err["abs_err"] = (df_err["y"] - df_err["pred"]).abs()
 
-    print(summary)
+summary = df_err.groupby("bin").agg(
+    count=("y", "size"),
+    mae=("abs_err", "mean")
+).reset_index()
 
-error_by_bins(y_test, y_pred, n_bins=6)
+print(summary)
 
-How to interpret
-	•	If rare bins (like very low satisfaction) have huge MAE, imbalance is still hurting.
-	•	Sample weights usually reduce those gaps.
+Interpretation
+	•	If low/high bins have much higher MAE → model struggles on rare ranges
+	•	If weights worked → MAE becomes more uniform across bins
 
 ⸻
 
-7.3 Cross-validation (stronger evaluation than one split)
+15) Cross-validation evaluation (more reliable than one split)
 
 cv = KFold(n_splits=5, shuffle=True, random_state=42)
 
-# Cross-validated predictions for analysis
+# Cross-validated predictions (for overall report)
 y_cv_pred = cross_val_predict(model, X, y, cv=cv, n_jobs=-1)
+y_cv_pred = np.clip(y_cv_pred, 0, 10)
 
-print(pd.Series(regression_report(y, y_cv_pred)).sort_index())
+print("CV MAE :", mean_absolute_error(y, y_cv_pred))
+print("CV RMSE:", np.sqrt(mean_squared_error(y, y_cv_pred)))
+print("CV R2  :", r2_score(y, y_cv_pred))
 
-What it shows
-	•	More realistic estimate of performance on unseen data.
-	•	Less dependent on a single train/test split.
+Interpretation
+	•	More stable estimate of performance on unseen data
+	•	If CV results are much worse than test split → your split was “lucky” or data has drift
 
 ⸻
 
-8) Feature importance (interpretation)
+16) Feature importance (Permutation Importance)
 
-8.1 Permutation importance (recommended)
-
-Works even after OneHot encoding.
+Best way to interpret features with one-hot encoding.
 
 perm = permutation_importance(
-    model, X_test, y_test,
+    model,
+    X_test,
+    y_test,
     n_repeats=10,
     random_state=42,
     n_jobs=-1
 )
 
-# Extract feature names
 feature_names = model.named_steps["prep"].get_feature_names_out()
+importances = pd.Series(perm.importances_mean, index=feature_names).sort_values(ascending=False)
 
-imp = pd.Series(perm.importances_mean, index=feature_names).sort_values(ascending=False)
-print(imp.head(30))
+print(importances.head(30))
 
-What it shows
-	•	How much the metric worsens when you randomly shuffle a feature.
-	•	If shuffling a feature destroys performance → it was important.
-
-Caution
-	•	Correlated features share importance; one may look less important because the other carries similar info.
+Interpretation
+	•	Higher importance = shuffling this feature harms predictions more
+	•	Correlated features share importance
 
 ⸻
 
-9) Save and load the whole pipeline
+17) Save & load model (pipeline includes preprocessing!)
 
-joblib.dump(model, "satisfaction_rf_pipeline.joblib")
-
-loaded = joblib.load("satisfaction_rf_pipeline.joblib")
+joblib.dump(model, "satisfaction_model.joblib")
+loaded_model = joblib.load("satisfaction_model.joblib")
 
 
 ⸻
 
-10) Predict by typing the input yourself (dictionary → prediction)
+18) Predict from a dictionary (you type values yourself)
 
-This is exactly what you asked: you enter a dictionary, model predicts satisfaction 0..10.
+Example dictionary (YOU must use your real column names)
 
-# Example: YOU will replace keys/values with your real columns
-sample = {
+sample_input = {
+    # numeric columns examples
     "age": 29,
+    "rides_last_month": 12,
     "salary": 2500,
+
+    # categorical columns examples
     "city": "Tunis",
     "subscription_type": "premium",
-    "car_owner": "yes",
-    "rides_last_month": 12
+    "car_owner": "yes"
 }
 
-sample_df = pd.DataFrame([sample])
+sample_df = pd.DataFrame([sample_input])
 
-pred_value = loaded.predict(sample_df)[0]
-print("Predicted satisfaction:", pred_value)
+pred = loaded_model.predict(sample_df)[0]
+pred = float(np.clip(pred, 0, 10))
 
-Important rules so dict prediction works
-	1.	Your dict keys must match the original DataFrame column names (except target).
-	2.	If a categorical value is unseen, OneHotEncoder with handle_unknown="ignore" will still work.
-	3.	Missing columns will cause error. If you want, I can add a “schema guard” that fills missing columns automatically.
+print("Predicted satisfaction:", pred)
+print("Rounded (0..10 integer):", int(np.round(pred)))
 
-⸻
-
-11) (Optional but recommended) keep predictions inside [0, 10]
-
-Random forests can predict outside range slightly.
-
-pred_value = np.clip(pred_value, 0, 10)
-
-If your satisfaction is strictly integer 0..10, you can round:
-
-pred_int = int(np.round(np.clip(pred_value, 0, 10)))
-
+Why this works
+	•	OneHotEncoder handles categories
+	•	handle_unknown="ignore" prevents crash if category is new
+	•	Pipeline applies the exact same preprocessing as training
 
 ⸻
 
-12) One complete script (end-to-end)
+19) What to change first if results are not good
 
-If you want everything in one runnable file, combine sections 2→10 exactly.
-If you paste your real column names (or df.dtypes) I can output a final script that is 100% tailored to your dataset.
+If predictions are too “average” (always around 6–8)
+	•	Increase importance of rare ranges:
+	•	increase bins (q=8)
+	•	keep weights
+	•	Increase model capacity:
+	•	max_features=1.0 (or 0.7)
+	•	more trees: n_estimators=1000
+
+If overfitting (good train, bad test)
+	•	regularize:
+	•	min_samples_leaf=3 or 5
+	•	max_depth=10 or 20
+	•	max_samples=0.8
 
 ⸻
 
-If you answer just these 2 details, I’ll tailor it perfectly (no back-and-forth)
-	•	What is the exact target column name (satisfaction column)?
-	•	Is satisfaction integer 0..10 or can it be float (like 7.3)?
-
-Even without that, the code above is ready: replace "data.csv" + TARGET, and update the sample dictionary keys to match your columns.
-
+If you paste your DataFrame columns (just df.dtypes output), I can rewrite the last “dictionary example” with your real feature names so you can copy/paste and test immediately.
 ```
