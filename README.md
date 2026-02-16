@@ -1,72 +1,55 @@
 ```
-Got it — here is the same documentation you pasted, but remade cleanly, expanded, and practical, with:
-	•	No custom helper functions (everything written inline so you understand)
-	•	Encoding categorical + numeric data (OneHot + Ordinal + Target encoding)
-	•	How to apply on a DataFrame
-	•	Imbalanced target (classification) with real-world techniques
-	•	Every technique’s main hyperparameters explained
-	•	Evaluation methods explained (what they show + how to interpret)
-	•	Predict from a dictionary at the end (you type inputs manually)
+Perfect — 0 to 10 means you’re doing REGRESSION, not classification.
+So I’m remaking the documentation for:
+	1.	Encoding categorical + numeric data (OneHotEncoder + alternatives)
+	2.	Handling an “imbalanced” target in regression (rare satisfaction scores) so the model doesn’t ignore them
+	3.	Training a model end-to-end (Pipeline + RandomForestRegressor with hyperparameters)
+	4.	Evaluation techniques for regression (what each shows + how to interpret)
+	5.	Predicting from a dictionary (you type the data manually)
+
+And as you asked: no custom helper functions — all code is inline.
 
 ⸻
 
-Part A — Encoding & Preprocessing for ML (DataFrame → model-ready)
+Part A — Encoding & Preprocessing (DataFrame → model-ready)
 
-1) Goal: Build a clean X matrix for scikit-learn
-
-Most ML models need:
-	•	Numeric matrix input
-	•	No missing values (most models)
-	•	Same feature columns in train and test
-
-So we do:
-	•	Categorical → encoded
-	•	Numeric → impute missing (and optionally scale)
-	•	Use a Pipeline so transforms are learned only on training (avoid leakage)
-
-⸻
-
-2) Load Data + choose target
+1) Load data and define target
 
 import numpy as np
 import pandas as pd
 
 df = pd.read_csv("data.csv")
 
-TARGET = "target"  # change this to your target column name
-
+TARGET = "satisfaction"   # 0..10
 X = df.drop(columns=[TARGET]).copy()
 y = df[TARGET].copy()
 
 print(df.shape)
 print(df.head())
+print(y.describe())
 
 
 ⸻
 
-3) Detect numeric vs categorical columns (pandas)
+2) Identify numeric vs categorical columns
 
 num_cols = X.select_dtypes(include=[np.number]).columns.tolist()
 cat_cols = X.select_dtypes(exclude=[np.number]).columns.tolist()
 
-print("Numeric columns:", num_cols)
-print("Categorical columns:", cat_cols)
+print("Numeric:", num_cols)
+print("Categorical:", cat_cols)
 
 
 ⸻
 
-4) Best practice: ColumnTransformer + Pipeline
+3) Best practice preprocessing: ColumnTransformer + Pipeline
 
-Why this is best:
-	•	transforms are fitted only on training folds (no leakage)
-	•	consistent encoded columns train/test
-	•	works in CV + hyperparameter search
+Why:
+	•	avoids leakage (fit preprocessing only on train folds)
+	•	keeps same columns between train/test (critical with one-hot)
+	•	works with CV and hyperparameter tuning
 
-⸻
-
-5) Minimal robust preprocessing (Impute + OneHot)
-
-5.1 Imports
+3.1 Imports
 
 from sklearn.model_selection import train_test_split
 from sklearn.compose import ColumnTransformer
@@ -74,473 +57,403 @@ from sklearn.pipeline import Pipeline
 from sklearn.impute import SimpleImputer
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-5.2 Build the preprocessing pipelines (inline)
+3.2 Build preprocessing (OneHot for categorical)
 
-✅ Numeric pipeline:
-	•	fill missing with median
-	•	scaling optional (useful for linear/SVM/kNN; not needed for trees)
+✅ Numeric: median impute (and optional scaling)
+✅ Categorical: most_frequent impute + OneHotEncoder
 
-scale_numeric = True  # set False if you use tree models (RandomForest, XGBoost, etc.)
+scale_numeric = False  # For RandomForest: usually False. True if you later try linear/SVM/kNN.
 
-numeric_steps = [
-    ("imputer", SimpleImputer(strategy="median"))
-]
+numeric_steps = [("imputer", SimpleImputer(strategy="median"))]
 if scale_numeric:
     numeric_steps.append(("scaler", StandardScaler()))
-
 num_pipe = Pipeline(steps=numeric_steps)
-
-✅ Categorical pipeline (OneHotEncoding):
-	•	fill missing with most frequent
-	•	one-hot encode
-	•	ignore unknown categories at test time
 
 cat_pipe = Pipeline(steps=[
     ("imputer", SimpleImputer(strategy="most_frequent")),
     ("onehot", OneHotEncoder(handle_unknown="ignore", sparse_output=False))
 ])
 
-✅ Combine them:
-
 preprocessor = ColumnTransformer(
     transformers=[
         ("num", num_pipe, num_cols),
-        ("cat", cat_pipe, cat_cols)
+        ("cat", cat_pipe, cat_cols),
     ],
     remainder="drop",
     verbose_feature_names_out=False
 )
 
+Key preprocessing hyperparameters explained
+
+SimpleImputer
+	•	strategy="median" (numeric): robust to outliers (best default)
+	•	strategy="most_frequent" (categorical): fills missing with most common category
+
+OneHotEncoder
+	•	handle_unknown="ignore": if you later type a category never seen → no crash
+	•	sparse_output=False: easier to inspect; set True for huge data
+
+StandardScaler
+	•	needed for distance/linear models
+	•	not required for trees (RandomForest)
 
 ⸻
 
-6) Key hyperparameters explained (Preprocessing)
+Part B — Handling “Imbalanced” Target in Regression (0..10)
 
-SimpleImputer(strategy=...)
+With satisfaction 0..10, “imbalance” means:
+	•	you may have many 7/8/9 and very few 0/1/2
+	•	the model learns to predict the common scores and ignores rare ones
 
-Numeric
-	•	median: robust to outliers (recommended baseline)
-	•	mean: ok if no strong outliers
-	•	most_frequent: rarely used for numeric
-
-Categorical
-	•	most_frequent: best simple default
-	•	constant + fill_value="missing": forces a “missing category” bucket (useful sometimes)
+We solve this with (1) stratified split using bins and (2) sample weighting.
+Optionally, (3) upsampling rare bins.
 
 ⸻
 
-OneHotEncoder(...)
-	•	handle_unknown="ignore"
-If you later predict with a category never seen during training → model still works.
-	•	sparse_output=False
-Easier to inspect (dense array). For huge data → set True to reduce memory.
-	•	drop="first"
-Drops one column per categorical variable (avoids collinearity). Useful for linear models; usually not needed for trees.
+4) Stratified train/test split for regression (using target bins)
 
-⸻
+train_test_split(stratify=...) expects categories → we create bins from y.
 
-StandardScaler()
-	•	rescales numeric columns to mean 0, std 1
-	•	needed for:
-	•	logistic regression
-	•	SVM
-	•	kNN
-	•	neural nets
-	•	not needed for:
-	•	RandomForest
-	•	GradientBoostedTrees
+# Create bins of y using quantiles
+# If dataset is small, use q=4; if large, q=8 is fine
+y_bins = pd.qcut(y, q=6, duplicates="drop")
+print("Bin counts:\n", y_bins.value_counts())
 
-⸻
-
-7) Train/test split + model training (end-to-end)
-
-We’ll show with Logistic Regression as example (classic for classification).
-
-from sklearn.linear_model import LogisticRegression
-from sklearn.metrics import classification_report
-
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
+X_train, X_test, y_train, y_test, bins_train, bins_test = train_test_split(
+    X, y, y_bins,
     test_size=0.2,
     random_state=42,
-    stratify=y  # IMPORTANT for imbalanced classification
+    stratify=y_bins
 )
 
-model = LogisticRegression(max_iter=2000)
+print("Train bins:\n", bins_train.value_counts(normalize=True))
+print("Test bins:\n", bins_test.value_counts(normalize=True))
 
-clf = Pipeline(steps=[
+What this achieves
+	•	rare satisfaction ranges appear in both train and test
+	•	evaluation becomes fair (you’ll see if model fails on rare scores)
+
+⸻
+
+5) Sample weights (best technique for imbalanced regression)
+
+We weight examples from rare bins higher.
+
+# Frequency of each bin in TRAIN
+bin_freq = bins_train.value_counts(normalize=True)
+
+# Weight per row = 1 / freq(bin)
+train_weights = bins_train.map(lambda b: 1.0 / bin_freq[b]).astype(float).values
+
+# Normalize (optional): keep mean weight around 1
+train_weights = train_weights / train_weights.mean()
+
+print("weights: min/mean/max =", train_weights.min(), train_weights.mean(), train_weights.max())
+
+Interpretation
+	•	if a bin is rare, its samples get larger weights
+	•	the model “cares” more about those rare ranges
+
+⸻
+
+6) Optional: Upsample rare target bins (alternative or additional)
+
+This duplicates rare samples so the learner sees them more often.
+
+Use this only if needed (weights usually enough).
+Here’s a simple upsampling approach in pure pandas:
+
+train_df = X_train.copy()
+train_df[TARGET] = y_train.values
+train_df["bin"] = bins_train.values
+
+# Target count = max bin size (fully balanced)
+max_count = train_df["bin"].value_counts().max()
+
+balanced_parts = []
+for b, part in train_df.groupby("bin"):
+    # sample with replacement to reach max_count
+    part_up = part.sample(n=max_count, replace=True, random_state=42)
+    balanced_parts.append(part_up)
+
+train_bal = pd.concat(balanced_parts).sample(frac=1.0, random_state=42).reset_index(drop=True)
+
+X_train_bal = train_bal.drop(columns=[TARGET, "bin"])
+y_train_bal = train_bal[TARGET]
+
+If you use upsampling, you can train without sample_weight (or still use weights lightly).
+
+⸻
+
+Part C — Train a model (Random Forest Regression) with hyperparameters explained
+
+7) Imports
+
+from sklearn.ensemble import RandomForestRegressor
+
+8) RandomForestRegressor hyperparameters (detailed)
+
+Here is a full model with key hyperparameters shown:
+
+rf = RandomForestRegressor(
+    # --- Core / stability ---
+    n_estimators=600,          # number of trees. More = more stable, slower.
+    random_state=42,           # reproducibility
+    n_jobs=-1,                 # parallel CPU usage
+
+    # --- Split criterion ---
+    criterion="squared_error", # MSE objective. Alternative: "absolute_error" (more robust, slower)
+
+    # --- Control overfitting (tree complexity) ---
+    max_depth=None,            # None allows deep trees (can overfit)
+    min_samples_split=2,       # min samples required to split a node (bigger => simpler)
+    min_samples_leaf=1,        # min samples in leaf (bigger => smoother predictions)
+    max_leaf_nodes=None,       # limit leaf nodes (int). Helps regularize.
+    min_impurity_decrease=0.0, # require impurity improvement to split (regularize)
+
+    # --- Randomness (features) ---
+    max_features="sqrt",       # features considered per split: "sqrt", "log2", float, int
+                               # with many one-hot columns, "sqrt" often generalizes better
+
+    # --- Randomness (rows) ---
+    bootstrap=True,            # sample rows with replacement
+    max_samples=None,          # if bootstrap=True, set like 0.8 for more diversity
+
+    # --- Advanced regularization ---
+    ccp_alpha=0.0,             # pruning strength (0 means no pruning)
+    oob_score=False            # out-of-bag score (only if bootstrap=True)
+)
+
+How to tune quickly (rules of thumb)
+
+If you overfit (train great, test bad):
+	•	set min_samples_leaf=3 or 5
+	•	set max_depth=10 or 20
+	•	set max_samples=0.8
+	•	consider ccp_alpha > 0
+
+If you underfit (both bad):
+	•	increase n_estimators
+	•	allow more depth (max_depth=None)
+	•	reduce min_samples_leaf
+
+⸻
+
+9) Build the full pipeline (preprocessing + model)
+
+model = Pipeline(steps=[
     ("prep", preprocessor),
-    ("model", model)
+    ("model", rf)
 ])
 
-clf.fit(X_train, y_train)
-pred = clf.predict(X_test)
 
-print(classification_report(y_test, pred))
+⸻
+
+10) Train (with sample weights) — recommended
+
+model.fit(X_train, y_train, model__sample_weight=train_weights)
+
+If you use upsampled training set instead:
+
+# model.fit(X_train_bal, y_train_bal)
 
 
 ⸻
 
-8) Get feature names after encoding
+11) Predict
 
-This is super useful to debug OneHotEncoder columns.
+y_pred = model.predict(X_test)
 
-prep = clf.named_steps["prep"]
-feature_names = prep.get_feature_names_out()
-print("Total encoded features:", len(feature_names))
-print(feature_names[:40])
+# Keep inside 0..10 (optional, but recommended)
+y_pred = np.clip(y_pred, 0, 10)
 
 
 ⸻
 
-9) Other encoding strategies (when to use)
+Part D — Evaluation techniques for Regression (what each shows + interpretation)
 
-9.1 Ordinal Encoding (ordered categories)
-
-Use ONLY if your categories are truly ordered:
-low < medium < high
-
-from sklearn.preprocessing import OrdinalEncoder
-
-cat_pipe_ordinal = Pipeline(steps=[
-    ("imputer", SimpleImputer(strategy="most_frequent")),
-    ("ord", OrdinalEncoder(
-        handle_unknown="use_encoded_value",
-        unknown_value=-1
-    ))
-])
-
-preprocessor_ordinal = ColumnTransformer(
-    transformers=[
-        ("num", num_pipe, num_cols),
-        ("cat", cat_pipe_ordinal, cat_cols)
-    ],
-    remainder="drop",
-    verbose_feature_names_out=False
-)
-
-OrdinalEncoder params
-	•	handle_unknown="use_encoded_value": prevents crash on new categories
-	•	unknown_value=-1: unseen categories mapped to -1
-
-⚠️ Warning: if categories are not ordered, ordinal encoding injects fake numeric meaning.
-
-⸻
-
-9.2 Target Encoding (high-cardinality categories)
-
-Use for: city, merchant_id, customer_id (many unique values)
-One-hot may create thousands of columns.
-
-Install:
-
-pip install category_encoders
-
-import category_encoders as ce
-
-cat_pipe_target = Pipeline(steps=[
-    ("imputer", SimpleImputer(strategy="most_frequent")),
-    ("te", ce.TargetEncoder(
-        smoothing=10.0,
-        min_samples_leaf=20
-    ))
-])
-
-preprocessor_target = ColumnTransformer(
-    transformers=[
-        ("num", num_pipe, num_cols),
-        ("cat", cat_pipe_target, cat_cols)
-    ],
-    remainder="drop",
-    verbose_feature_names_out=False
-)
-
-TargetEncoder params
-	•	smoothing: higher = more shrinkage to global mean (reduces overfit)
-	•	min_samples_leaf: small categories get stronger smoothing
-
-⚠️ Must be used in a pipeline + CV to avoid leakage.
-
-⸻
-
-⸻
-
-Part B — Handling Imbalanced Target Data (Classification)
-
-Imbalanced classification = rare positive class (fraud, churn, defect).
-Accuracy becomes misleading. We need better metrics and techniques.
-
-⸻
-
-1) Correct evaluation metrics for imbalanced classification
-
-1.1 What each metric tells you
-	•	Precision: when model predicts positive, how often it’s correct
-→ High precision = few false alarms
-	•	Recall: among real positives, how many were detected
-→ High recall = fewer missed positives
-	•	F1: balance precision + recall
-→ Useful when you want both
-	•	ROC-AUC: ranking ability (can look good even with extreme imbalance)
-	•	PR-AUC (Average Precision): best for rare positives
-	•	Balanced Accuracy: average recall across classes
-
-1.2 Code
+12) Metrics
 
 from sklearn.metrics import (
-    confusion_matrix,
-    classification_report,
-    roc_auc_score,
-    average_precision_score
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    explained_variance_score,
+    mean_absolute_percentage_error,
+    median_absolute_error
 )
 
-proba = clf.predict_proba(X_test)[:, 1]
-pred = clf.predict(X_test)
+mae = mean_absolute_error(y_test, y_pred)
+mse = mean_squared_error(y_test, y_pred)
+rmse = np.sqrt(mse)
+r2 = r2_score(y_test, y_pred)
+evs = explained_variance_score(y_test, y_pred)
+mape = mean_absolute_percentage_error(y_test, y_pred)
+medae = median_absolute_error(y_test, y_pred)
 
-print(confusion_matrix(y_test, pred))
-print(classification_report(y_test, pred))
+print("MAE :", mae)
+print("RMSE:", rmse)
+print("R2  :", r2)
+print("ExplainedVariance:", evs)
+print("MedianAE:", medae)
+print("MAPE:", mape)
 
-print("ROC-AUC:", roc_auc_score(y_test, proba))
-print("PR-AUC :", average_precision_score(y_test, proba))
-
+What each metric tells you
+	•	MAE: average error in satisfaction points (easy to explain)
+	•	RMSE: punishes large errors more (sensitive to big misses)
+	•	R²: how much variance explained (1 best; can be negative if bad)
+	•	Explained Variance: similar to R²; checks variance capture
+	•	MedianAE: “typical” error ignoring extreme outliers
+	•	MAPE: percent error (can be weird when y≈0)
 
 ⸻
 
-2) Technique 1: Class weights (strong baseline)
+13) Plots that explain model results
 
-Works well for LogisticRegression, SVM, trees.
+A) Actual vs Predicted
 
-model_w = LogisticRegression(
-    max_iter=2000,
-    class_weight="balanced"
-)
+Shows bias and whether predictions are compressed (not predicting extremes).
 
-clf_w = Pipeline(steps=[
-    ("prep", preprocessor),
-    ("model", model_w)
-])
+import matplotlib.pyplot as plt
 
-clf_w.fit(X_train, y_train)
-pred_w = clf_w.predict(X_test)
+plt.figure()
+plt.scatter(y_test, y_pred)
+plt.xlabel("Actual satisfaction")
+plt.ylabel("Predicted satisfaction")
+plt.title("Actual vs Predicted")
+plt.grid(True)
+plt.show()
 
-print(classification_report(y_test, pred_w))
-
-Class weight params
-	•	class_weight="balanced"
-weights are inverse to class frequency
-	•	or manual: class_weight={0:1, 1:5}
-
-Pros: no synthetic data, simple, effective baseline
-Cons: can increase recall but reduce precision
+How to interpret
+	•	Points near diagonal → good
+	•	If model avoids 0/10 → predictions cluster around middle
 
 ⸻
 
-3) Technique 2: SMOTE oversampling (numeric-friendly)
+B) Residuals vs Predicted
 
-Install:
+Detects patterns: missing features, nonlinearity, heteroscedasticity.
 
-pip install imbalanced-learn
+residuals = y_test - y_pred
 
-Important: do it inside pipeline only.
+plt.figure()
+plt.scatter(y_pred, residuals)
+plt.axhline(0)
+plt.xlabel("Predicted satisfaction")
+plt.ylabel("Residual (Actual - Predicted)")
+plt.title("Residuals vs Predicted")
+plt.grid(True)
+plt.show()
 
-from imblearn.pipeline import Pipeline as ImbPipeline
-from imblearn.over_sampling import SMOTE
-from sklearn.ensemble import RandomForestClassifier
+How to interpret
+	•	random cloud around 0 → good
+	•	curve pattern → model missing relationship
+	•	spread increases in some range → errors larger there
 
-smote = SMOTE(
-    sampling_strategy=0.5,
-    k_neighbors=5,
-    random_state=42
-)
+⸻
 
-rf_clf = RandomForestClassifier(
-    n_estimators=400,
+14) Evaluate fairness across target ranges (MOST IMPORTANT for imbalance)
+
+This checks whether rare ranges still have worse error.
+
+df_eval = pd.DataFrame({"y": y_test.values, "pred": y_pred})
+df_eval["bin"] = pd.qcut(df_eval["y"], q=6, duplicates="drop")
+df_eval["abs_err"] = (df_eval["y"] - df_eval["pred"]).abs()
+
+bin_summary = df_eval.groupby("bin").agg(
+    count=("y", "size"),
+    mae=("abs_err", "mean")
+).reset_index()
+
+print(bin_summary)
+
+Interpretation
+	•	If low/high bins have much larger MAE → imbalance still hurts
+	•	Weighting/upsampling should reduce this gap
+
+⸻
+
+15) Cross-validation (more reliable)
+
+from sklearn.model_selection import KFold, cross_val_predict
+
+cv = KFold(n_splits=5, shuffle=True, random_state=42)
+y_cv_pred = cross_val_predict(model, X, y, cv=cv, n_jobs=-1)
+y_cv_pred = np.clip(y_cv_pred, 0, 10)
+
+print("CV MAE :", mean_absolute_error(y, y_cv_pred))
+print("CV RMSE:", np.sqrt(mean_squared_error(y, y_cv_pred)))
+print("CV R2  :", r2_score(y, y_cv_pred))
+
+Interpretation
+	•	CV performance is more trustworthy than a single split
+
+⸻
+
+16) Feature importance (Permutation importance)
+
+Best for one-hot encoded features.
+
+from sklearn.inspection import permutation_importance
+
+perm = permutation_importance(
+    model, X_test, y_test,
+    n_repeats=10,
     random_state=42,
     n_jobs=-1
 )
 
-pipe_smote = ImbPipeline(steps=[
-    ("prep", preprocessor),
-    ("smote", smote),
-    ("model", rf_clf)
-])
+feature_names = model.named_steps["prep"].get_feature_names_out()
+importances = pd.Series(perm.importances_mean, index=feature_names).sort_values(ascending=False)
 
-pipe_smote.fit(X_train, y_train)
-pred_smote = pipe_smote.predict(X_test)
-
-print(classification_report(y_test, pred_smote))
-
-SMOTE params explained
-	•	sampling_strategy
-	•	0.5: minority becomes 50% of majority
-	•	"auto": full balance
-	•	dict: exact per-class counts
-	•	k_neighbors
-	•	how many neighbors used to create synthetic samples
-	•	small minority count → reduce to 3
-	•	random_state: reproducibility
-
-Pros: improves recall
-Cons: synthetic samples can be unrealistic, especially for categorical variables
-
-⸻
-
-4) Technique 3: SMOTENC (mixed numeric + categorical)
-
-Use when you have categorical features and you want oversampling before one-hot.
-
-from sklearn.preprocessing import OrdinalEncoder
-from imblearn.over_sampling import SMOTENC
-
-# encode categorical as ordinal first (temporary)
-cat_pipe_ord_for_smote = Pipeline(steps=[
-    ("imputer", SimpleImputer(strategy="most_frequent")),
-    ("ord", OrdinalEncoder(handle_unknown="use_encoded_value", unknown_value=-1))
-])
-
-pre_smote_prep = ColumnTransformer(
-    transformers=[
-        ("num", Pipeline(steps=[("imputer", SimpleImputer(strategy="median"))]), num_cols),
-        ("cat", cat_pipe_ord_for_smote, cat_cols)
-    ],
-    remainder="drop"
-)
-
-cat_indices = list(range(len(num_cols), len(num_cols) + len(cat_cols)))
-
-smote_nc = SMOTENC(
-    categorical_features=cat_indices,
-    sampling_strategy=0.5,
-    k_neighbors=5,
-    random_state=42
-)
-
-pipe_smote_nc = ImbPipeline(steps=[
-    ("prep", pre_smote_prep),
-    ("smote", smote_nc),
-    ("model", RandomForestClassifier(n_estimators=400, random_state=42, n_jobs=-1))
-])
-
-pipe_smote_nc.fit(X_train, y_train)
-pred_nc = pipe_smote_nc.predict(X_test)
-
-print(classification_report(y_test, pred_nc))
-
-SMOTENC params
-	•	categorical_features: indices of categorical columns in transformed matrix
-	•	others like SMOTE
-
-⸻
-
-5) Technique 4: Under-sampling (fast for huge datasets)
-
-from imblearn.under_sampling import RandomUnderSampler
-
-rus = RandomUnderSampler(
-    sampling_strategy=0.8,
-    random_state=42
-)
-
-pipe_under = ImbPipeline(steps=[
-    ("prep", preprocessor),
-    ("under", rus),
-    ("model", LogisticRegression(max_iter=2000))
-])
-
-pipe_under.fit(X_train, y_train)
-pred_under = pipe_under.predict(X_test)
-
-print(classification_report(y_test, pred_under))
-
-UnderSampler params
-	•	sampling_strategy=0.8: minority becomes 0.8× majority after sampling
-
-Pros: fast, avoids synthetic points
-Cons: discards data (can hurt performance)
-
-⸻
-
-6) Technique 5: Threshold tuning (VERY important)
-
-Default threshold = 0.5 is often wrong in imbalance.
-
-from sklearn.metrics import precision_recall_curve
-
-proba = pipe_smote.predict_proba(X_test)[:, 1]
-precision, recall, thresholds = precision_recall_curve(y_test, proba)
-
-target_recall = 0.85
-idx = np.where(recall >= target_recall)[0][-1]
-best_threshold = thresholds[idx] if idx < len(thresholds) else 0.5
-
-pred_custom = (proba >= best_threshold).astype(int)
-
-print("Best threshold:", best_threshold)
-print(classification_report(y_test, pred_custom))
+print(importances.head(30))
 
 What it shows
-	•	You choose a threshold to meet business goal (e.g., recall ≥ 85%)
-	•	It directly controls FP vs FN tradeoff
+	•	If shuffling a feature increases error a lot → feature is important
+	•	Correlated features share importance (may reduce each other’s score)
 
 ⸻
 
-7) Best-practice recipe (real-world)
-	1.	Split with stratify=y
-	2.	Use pipeline (preprocessing + model)
-	3.	Start with class_weight="balanced"
-	4.	Evaluate with PR-AUC + F1 + recall/precision
-	5.	Add SMOTE/SMOTENC if needed
-	6.	Tune threshold
-	7.	Validate with Stratified CV
+Part E — Save/Load + Predict from Dictionary (your manual test)
 
-⸻
+17) Save the pipeline
 
-8) Stratified cross-validation for imbalanced classification
+import joblib
+joblib.dump(model, "satisfaction_rf_pipeline.joblib")
 
-from sklearn.model_selection import StratifiedKFold, cross_val_score
+18) Load and predict from a dictionary
 
-skf = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-scores = cross_val_score(
-    pipe_smote,  # or clf_w, pipe_under, etc.
-    X, y,
-    cv=skf,
-    scoring="average_precision",
-    n_jobs=-1
-)
-
-print("CV PR-AUC mean:", scores.mean())
-print("CV PR-AUC std :", scores.std())
-
-
-⸻
-
-Extra: Predict by typing a dictionary (manual test)
-
-Works best with OneHotEncoder pipeline (handle_unknown="ignore").
+loaded = joblib.load("satisfaction_rf_pipeline.joblib")
 
 sample = {
-    # Put your real column names here:
+    # Put YOUR real column names here:
     "age": 29,
     "city": "Tunis",
     "subscription_type": "premium",
-    "rides_last_month": 10
+    "rides_last_month": 10,
+    "salary": 2500
 }
 
 sample_df = pd.DataFrame([sample])
 
-pred = clf.predict(sample_df)[0]
-proba = clf.predict_proba(sample_df)[0, 1]
+pred = loaded.predict(sample_df)[0]
+pred = float(np.clip(pred, 0, 10))
 
-print("Predicted class:", pred)
-print("Predicted probability of positive class:", proba)
+print("Predicted satisfaction:", pred)
+print("Rounded 0..10:", int(np.round(pred)))
 
+Why it won’t crash with new categories
+	•	OneHotEncoder has handle_unknown="ignore"
 
 ⸻
 
-If you want, I can “lock” this into one single script that you copy/paste and run, but I need only:
-	•	target column name
-	•	are you predicting binary class (0/1) or multi-class?
+If you want it “perfect” for your dataset
+
+Send me:
+	•	df.dtypes (just the output)
+	•	and the exact TARGET column name
+
+Then I’ll rewrite the sample = {...} dictionary with your real columns + recommend the best RF hyperparameters for your dataset size.
 
 
 ```
