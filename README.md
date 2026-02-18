@@ -1,1 +1,1 @@
-Conclusion : Plus le délai total de sinistre augmente, plus la satisfaction tend à diminuer, avec un point de rupture autour de 21 jours. Même si les métriques globales (corrélation / information mutuelle) sont faibles, la segmentation par tranches montre un impact opérationnel clair.
+
