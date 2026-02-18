@@ -1,212 +1,162 @@
 ```
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
-from matplotlib.patches import Patch
+from matplotlib.lines import Line2D
+
+
+def _format_minutes_to_compact(m: float) -> str:
+    """Convert minutes to compact label: 40m, 2h, 3d4h, etc."""
+    if pd.isna(m):
+        return ""
+    m_int = int(round(float(m)))
+    if m_int < 60:
+        return f"{m_int}m"
+    total = m_int
+    days = total // (24 * 60)
+    rem = total % (24 * 60)
+    hours = rem // 60
+    minutes = rem % 60
+
+    parts = []
+    if days > 0:
+        parts.append(f"{days}j")
+    if hours > 0:
+        parts.append(f"{hours}h")
+    if minutes > 0 and days == 0:
+        parts.append(f"{minutes}m")
+    return "".join(parts) if parts else "0m"
+
+
+def _interval_minutes_to_label(iv: pd.Interval) -> str:
+    left = _format_minutes_to_compact(iv.left)
+    right = _format_minutes_to_compact(iv.right)
+    return f"[{left}, {right})"
+
+
+def _interval_age_to_label(iv: pd.Interval) -> str:
+    # ex: [25, 35) -> "25–34"
+    left = int(iv.left)
+    right = int(iv.right) - 1
+    return f"{left}–{right}"
 
 
 def bubble_delay_age_volume(
     df: pd.DataFrame,
     delay_col: str,
     age_col: str,
-    delay_breaks,                 # ex: [0, 60, 120, 240, 480, 1440, ...] (minutes)
-    age_breaks=None,              # ex: [0, 25, 35, 45, 60, 120] or None -> auto (quantiles)
-    delay_range=None,             # (min, max) optional
-    age_range=None,               # (min, max) optional
-    title="Volume par délai et tranche d'âge",
-    figsize=(13, 6),
-    max_bubble_area=4500,         # controls bubble size (avoid huge figures)
-    min_bubble_area=200,
-    alpha=0.55,
-    edgecolor="white",
-    linewidth=1.2,
-    show_grid=True,
-    fmt_delay="auto",             # "auto" | "minutes" | "hours" | "days"
+    delay_breaks,
+    age_breaks,
+    title: str = "Volume par délai et tranche d'âge",
+    figsize=(12, 6),
+    alpha=0.45,
+    size_scale=35.0,   # bigger => bigger bubbles
 ):
     """
-    Bubble chart (like your example):
-      - X = intervalle de délai (bins)
-      - Y = tranche d'âge (bins)
-      - Taille de bulle = volume (count)
-      - Texte dans la bulle = "count\n(p%)"
-      - Couleur = tranche d'âge (légende en haut à gauche)
-
-    Returns:
-      pivot table with count/pct per (delay_bin, age_bin)
+    Bubble chart:
+      - X axis: delay intervals (bins)
+      - Y axis: age (midpoint) from 0 to 100
+      - Bubble size: volume (count)
+      - Bubble label: "count (pct%)"
+      - Bubble color: age tranche (legend top-left)
     """
 
-    # ---------------- helpers ----------------
-    def _fmt_minutes(m: float) -> str:
-        m = float(m)
-        if fmt_delay == "minutes":
-            return f"{int(round(m))} min"
-        if fmt_delay == "hours":
-            h = m / 60
-            return f"{h:.0f} h" if h >= 10 else f"{h:.1f} h"
-        if fmt_delay == "days":
-            d = m / (24 * 60)
-            return f"{d:.0f} j" if d >= 10 else f"{d:.1f} j"
-
-        # auto
-        if m < 60:
-            return f"{int(round(m))} min"
-        if m < 24 * 60:
-            h = m / 60
-            return f"{h:.0f} h" if h >= 10 else f"{h:.1f} h"
-        d = m / (24 * 60)
-        return f"{d:.0f} j" if d >= 10 else f"{d:.1f} j"
-
-    def _interval_label(iv: pd.Interval) -> str:
-        return f"[{_fmt_minutes(iv.left)} ; {_fmt_minutes(iv.right)})"
-
-    # ---------------- validate + clean ----------------
-    if delay_col not in df.columns:
-        raise ValueError(f"Colonne '{delay_col}' introuvable.")
-    if age_col not in df.columns:
-        raise ValueError(f"Colonne '{age_col}' introuvable.")
-    if delay_breaks is None or len(delay_breaks) < 2:
-        raise ValueError("delay_breaks doit contenir au moins 2 bornes.")
-
-    d = df[[delay_col, age_col]].copy()
+    # ---------- clean data ----------
+    d = df[[delay_col, age_col]].dropna().copy()
     d[delay_col] = pd.to_numeric(d[delay_col], errors="coerce")
     d[age_col] = pd.to_numeric(d[age_col], errors="coerce")
-    d = d.dropna(subset=[delay_col, age_col]).copy()
+    d = d.dropna()
 
-    if delay_range is not None:
-        d = d[(d[delay_col] >= delay_range[0]) & (d[delay_col] <= delay_range[1])].copy()
+    # ---------- bins ----------
+    delay_breaks = sorted(delay_breaks)
+    age_breaks = sorted(age_breaks)
 
-    if age_range is not None:
-        d = d[(d[age_col] >= age_range[0]) & (d[age_col] <= age_range[1])].copy()
-
-    if d.empty:
-        raise ValueError("Aucune donnée après filtrage (delay_range/age_range/NaN).")
-
-    delay_breaks = sorted(set([float(x) for x in delay_breaks]))
-
-    # auto age bins (quantiles) if not provided
-    if age_breaks is None:
-        qs = d[age_col].quantile([0, 0.25, 0.5, 0.75, 1.0]).values
-        age_breaks = np.unique(np.round(qs, 0)).astype(float).tolist()
-        if len(age_breaks) < 3:
-            mn, mx = float(d[age_col].min()), float(d[age_col].max())
-            age_breaks = [mn, (mn + mx) / 2, mx]
-
-    age_breaks = sorted(set([float(x) for x in age_breaks]))
-    if len(age_breaks) < 2:
-        raise ValueError("age_breaks doit contenir au moins 2 bornes.")
-
-    # ---------------- binning ----------------
     d["delay_bin"] = pd.cut(d[delay_col], bins=delay_breaks, right=False, include_lowest=True)
     d["age_bin"] = pd.cut(d[age_col], bins=age_breaks, right=False, include_lowest=True)
 
-    d = d.dropna(subset=["delay_bin", "age_bin"]).copy()
-    if d.empty:
-        raise ValueError("Toutes les lignes sont hors des bornes (delay_breaks/age_breaks).")
+    d = d.dropna(subset=["delay_bin", "age_bin"])
 
-    # ---------------- aggregate ----------------
-    total = len(d)
+    d["delay_label"] = d["delay_bin"].apply(_interval_minutes_to_label)
+    d["age_label"] = d["age_bin"].apply(_interval_age_to_label)
+
+    # Y position = midpoint of age interval
+    d["age_mid"] = d["age_bin"].apply(lambda iv: (float(iv.left) + float(iv.right)) / 2.0)
+
+    # ---------- aggregate (IMPORTANT: flat dataframe, no MultiIndex) ----------
     g = (
-        d.groupby(["delay_bin", "age_bin"], observed=True)
-        .size()
-        .reset_index(name="volume")
+        d.groupby(["delay_label", "age_label", "age_mid"], observed=True)
+         .size()
+         .reset_index(name="count")
     )
-    g["pct"] = (g["volume"] / total) * 100.0
 
-    # labels
-    delay_labels = {iv: _interval_label(iv) for iv in sorted(g["delay_bin"].unique())}
-    age_labels = {iv: f"[{int(iv.left)} ; {int(iv.right)}) ans" for iv in sorted(g["age_bin"].unique())}
-    g["delay_label"] = g["delay_bin"].map(delay_labels)
-    g["age_label"] = g["age_bin"].map(age_labels)
+    # percent within each delay interval (more meaningful than global)
+    g["pct"] = g["count"] / g.groupby("delay_label")["count"].transform("sum") * 100.0
 
-    # numeric positions for plotting
-    delay_order = list(delay_labels.values())
-    age_order = list(age_labels.values())
+    # ---------- order on X ----------
+    delay_order = [
+        _interval_minutes_to_label(pd.Interval(delay_breaks[i], delay_breaks[i + 1], closed="left"))
+        for i in range(len(delay_breaks) - 1)
+    ]
+    g["delay_label"] = pd.Categorical(g["delay_label"], categories=delay_order, ordered=True)
+    g = g.sort_values(["delay_label", "age_mid"])
 
-    g["x"] = g["delay_label"].apply(lambda s: delay_order.index(s))
-    g["y"] = g["age_label"].apply(lambda s: age_order.index(s))
+    x_pos = {lab: i for i, lab in enumerate(delay_order)}
+    g["x"] = g["delay_label"].map(x_pos).astype(float)
 
-    # ---------------- bubble size scaling ----------------
-    vmin, vmax = g["volume"].min(), g["volume"].max()
-    if vmax == vmin:
-        g["area"] = (min_bubble_area + max_bubble_area) / 2
-    else:
-        g["area"] = min_bubble_area + (g["volume"] - vmin) * (max_bubble_area - min_bubble_area) / (vmax - vmin)
+    # ---------- colors (age categories) ----------
+    age_order = sorted(g["age_label"].unique(), key=lambda s: int(str(s).split("–")[0]))
+    # use modern colormap access (no deprecation)
+    cmap = plt.colormaps.get_cmap("tab10")
+    age_to_color = {age_order[i]: cmap(i % 10) for i in range(len(age_order))}
 
-    # ---------------- color per age group ----------------
-    # use a discrete colormap, one color per age bin
-    cmap = plt.cm.get_cmap("tab10", len(age_order))
-    age_to_color = {age_order[i]: cmap(i) for i in range(len(age_order))}
+    # ✅ FIX: make sure age_label is scalar strings before mapping
+    g["age_label"] = g["age_label"].astype(str)
     g["color"] = g["age_label"].map(age_to_color)
 
-    # ---------------- plot ----------------
-    plt.style.use("ggplot")  # gives a grid vibe similar to your slides; remove if you want pure white
+    # ---------- plot ----------
+    plt.style.use("ggplot")
     fig, ax = plt.subplots(figsize=figsize)
 
+    sizes = np.maximum(g["count"].values.astype(float), 1.0) * size_scale
+
     ax.scatter(
-        g["x"],
-        g["y"],
-        s=g["area"],
-        c=g["color"].tolist(),
+        g["x"].values,
+        g["age_mid"].values,
+        s=sizes,
+        c=g["color"].values,
         alpha=alpha,
-        edgecolors=edgecolor,
-        linewidths=linewidth,
+        edgecolors="none",
     )
 
-    # text inside bubbles: "count\n(pct%)"
-    for _, row in g.iterrows():
-        ax.text(
-            row["x"],
-            row["y"],
-            f"{int(row['volume'])}\n({row['pct']:.1f}%)",
-            ha="center",
-            va="center",
-            fontsize=9,
-            color="black",
-        )
+    # annotate bubbles: "count (pct%)"
+    for _, r in g.iterrows():
+        txt = f"{int(r['count'])}\n({r['pct']:.0f}%)"
+        ax.text(r["x"], r["age_mid"], txt, ha="center", va="center", fontsize=9, color="black")
 
-    # axes
-    ax.set_xticks(range(len(delay_order)))
-    ax.set_xticklabels(delay_order, rotation=20, ha="right")
-    ax.set_yticks(range(len(age_order)))
-    ax.set_yticklabels(age_order)
-
-    ax.set_xlabel("Délai (intervalles)")
-    ax.set_ylabel("Tranches d'âge")
     ax.set_title(title)
+    ax.set_xlabel("Délai (tranches)")
+    ax.set_ylabel("Âge")
+    ax.set_ylim(0, 100)
 
-    if show_grid:
-        ax.grid(True, alpha=0.25)
-    else:
-        ax.grid(False)
+    ax.set_xticks(range(len(delay_order)))
+    ax.set_xticklabels(delay_order, rotation=25, ha="right")
 
-    # legend top-left (colors = age groups)
-    handles = [Patch(facecolor=age_to_color[a], edgecolor="none", label=a) for a in age_order]
-    ax.legend(handles=handles, title="Âge (code couleur)", loc="upper left", frameon=True)
+    # legend top-left (age colors)
+    handles = [
+        Line2D([0], [0], marker="o", color="w", label=f"Âge {lab}", markerfacecolor=age_to_color[lab], markersize=10)
+        for lab in age_order
+    ]
+    ax.legend(handles=handles, title="Tranches d'âge", loc="upper left", frameon=True)
 
+    ax.grid(True, which="major", axis="both", alpha=0.35)
     plt.tight_layout()
     plt.show()
 
-    # return a pivot-style table for your report if needed
-    out = g[["delay_label", "age_label", "volume", "pct"]].copy()
-    return out
-
-
-# ---------------- Example call ----------------
-# out = bubble_delay_age_volume(
-#     df=df,
-#     delay_col="delai_Sinistre",      # minutes
-#     age_col="Age",
-#     delay_breaks=[0, 60, 120, 240, 480, 1440, 2880, 4320, 7200, 10080],  # example
-#     age_breaks=[0, 25, 35, 45, 60, 120],                                  # example
-#     title="Volume par délai et âge (comptes et pourcentages)"
-# )
-# display(out.head())
-
+    return g
 
 out = bubble_delay_age_volume(
     df=df,
-    delay_col="delai_Sinistre",   # in minutes
+    delay_col="delai_Sinistre",   # minutes
     age_col="Age",
     delay_breaks=[0, 60, 120, 240, 480, 1440, 2880, 4320, 7200, 10080],
     age_breaks=[0, 25, 35, 45, 60, 120],
