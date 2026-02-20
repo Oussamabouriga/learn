@@ -1,10 +1,13 @@
 ```
 
-Comment résoudre ce problème ?
-	•	Intégrer une IA générative en complément du modèle de prédiction.
-	•	Le modèle prédit la note de satisfaction (0–10).
-	•	L’IA générative valide la cohérence de cette note à partir des données utilisées par le modèle.
-	•	Elle confirme la catégorie finale (neutre vs mauvais, notamment autour de 7,x) pour garantir une classification fiable et éviter de rater une action client.
+XGBoost (régression)
+	•	Prédit une note de satisfaction en apprenant étape par étape à réduire ses erreurs. (arbres + boosting, minimise une loss)
+	•	Fonctionne bien même si certaines informations manquent. (gestion des valeurs manquantes / imputation simple)
+	•	On vérifie qu’il est fiable et on comprend ses décisions. (cross-validation, SHAP)
 
+CatBoost (régression)
+	•	Même idée : prédire la note et s’améliorer progressivement avec ses erreurs. (boosting d’arbres, loss)
+	•	Très pratique quand on a beaucoup de champs “texte/catégorie” (type, statut, canal…). (cat features, encodage intégré)
+	•	On peut aussi le tester proprement et expliquer ce qui influence la note. (cross-validation, importance/contributions)
 
 ```
