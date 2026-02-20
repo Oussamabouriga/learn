@@ -1,19 +1,15 @@
 ```
-
-
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
 from typing import Optional, Tuple, List
 
-# --- your colors ---
 BLACK = "#000000"
 BLUE2 = "#728AF4"
 BLUE3 = "#00177A"
 
 def _format_minutes_compact(m: float) -> str:
-    """Format minutes as compact label: 45m, 2h, 3j2h..."""
     if m is None or (isinstance(m, float) and np.isnan(m)):
         return ""
     m = float(m)
@@ -36,7 +32,6 @@ def _format_minutes_compact(m: float) -> str:
     return "".join(parts) if parts else "0m"
 
 def _interval_to_label(iv: Optional[pd.Interval]) -> str:
-    """Age interval label like [18, 20), [20, 40) ..."""
     if iv is None or pd.isna(iv):
         return ""
     left = int(iv.left) if float(iv.left).is_integer() else iv.left
@@ -46,21 +41,15 @@ def _interval_to_label(iv: Optional[pd.Interval]) -> str:
 def plot_age_volume_with_delay_stats(
     df: pd.DataFrame,
     age_col: str,
-    delay_col: str,                         # delay in minutes
-    age_breaks: List[float],                # e.g. [18, 20, 40, 65, 80, 100]
-    delay_range: Optional[Tuple[float, float]] = None,  # e.g. (0, 10080)
+    delay_col: str,
+    age_breaks: List[float],
+    delay_range: Optional[Tuple[float, float]] = None,
     title: Optional[str] = None,
     figsize: Tuple[int, int] = (12, 6),
     bar_color: str = BLUE3,
     mean_color: str = BLUE2,
     median_color: str = BLACK,
 ):
-    """
-    Bars = volume (%) by age bins.
-    Lines (right axis) = mean + median delay by age bins.
-    """
-
-    # --- clean input ---
     use_cols = [age_col, delay_col]
     d = df[use_cols].copy()
 
@@ -72,7 +61,6 @@ def plot_age_volume_with_delay_stats(
         lo, hi = delay_range
         d = d[(d[delay_col] >= lo) & (d[delay_col] <= hi)]
 
-    # --- binning ---
     age_breaks = sorted(age_breaks)
     d["age_bin"] = pd.cut(d[age_col], bins=age_breaks, right=False, include_lowest=True)
 
@@ -93,21 +81,18 @@ def plot_age_volume_with_delay_stats(
     g["volume_pct"] = g["volume"] / total * 100.0
     g["age_label"] = g["age_bin"].apply(_interval_to_label)
 
-    # --- plot ---
     plt.style.use("ggplot")
     fig, ax = plt.subplots(figsize=figsize)
 
     x = np.arange(len(g))
     bars = ax.bar(x, g["volume_pct"], color=bar_color, alpha=0.95)
 
-    # Left axis: volume %
     ax.set_ylim(0, 100)
     ax.set_ylabel("Volume (%)")
     ax.set_xlabel("Âge (tranches)")
     ax.set_xticks(x)
     ax.set_xticklabels(g["age_label"], rotation=0)
 
-    # Bar labels: percent + count
     for i, b in enumerate(bars):
         pct = float(g["volume_pct"].iloc[i])
         n = int(g["volume"].iloc[i])
@@ -121,8 +106,9 @@ def plot_age_volume_with_delay_stats(
             color=BLACK,
         )
 
-    # Right axis: delay (mean + median)
     ax2 = ax.twinx()
+
+    # --- lines ---
     ax2.plot(
         x, g["delay_mean"],
         color=mean_color, marker="o", linewidth=2,
@@ -134,20 +120,42 @@ def plot_age_volume_with_delay_stats(
         label="Délai médian"
     )
 
+    # ✅ ADD TEXT LABELS on each point (same color as each line)
+    for i, val in enumerate(g["delay_mean"].values):
+        if pd.notna(val):
+            ax2.annotate(
+                _format_minutes_compact(val),
+                (x[i], val),
+                textcoords="offset points",
+                xytext=(0, 8),
+                ha="center",
+                fontsize=9,
+                color=mean_color,
+            )
+
+    for i, val in enumerate(g["delay_median"].values):
+        if pd.notna(val):
+            ax2.annotate(
+                _format_minutes_compact(val),
+                (x[i], val),
+                textcoords="offset points",
+                xytext=(0, -14),   # slightly lower so it doesn't overlap the mean label
+                ha="center",
+                fontsize=9,
+                color=median_color,
+            )
+
     ax2.set_ylabel(f"{delay_col} (affichage compact)")
     ax2.yaxis.set_major_formatter(FuncFormatter(lambda v, pos: _format_minutes_compact(v)))
 
-    # Grid style
     ax.grid(True, axis="y", alpha=0.25)
     ax.grid(False, axis="x")
 
-    # Title + spacing (more space between title and plot)
     if title is None:
         title = f"Volume (%) par tranche d'âge + délai (moyen/médian) — {delay_col}"
     ax.set_title(title, pad=22)
     fig.subplots_adjust(top=0.86)
 
-    # Legend top-left
     h1, l1 = ax2.get_legend_handles_labels()
     ax2.legend(h1, l1, loc="upper left", frameon=True)
 
@@ -156,15 +164,5 @@ def plot_age_volume_with_delay_stats(
 
     return g
 
-
-out = plot_age_volume_with_delay_stats(
-    df=df,
-    age_col="Age",
-    delay_col="delai_Sinistre",          # minutes
-    age_breaks=[18, 20, 40, 65, 80, 100],
-    delay_range=(0, 10080),              # optional
-    title="Volume (%) par tranche d’âge + délai moyen/médian"
-)
-display(out)
 
 ```
