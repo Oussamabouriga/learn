@@ -1,15 +1,10 @@
 ```
 
-Classification de la note de satisfaction (5 niveaux)
-La note est regroupée en cinq catégories pour guider les actions opérationnelles.
+Comment résoudre ce problème ?
+	•	Intégrer une IA générative en complément du modèle de prédiction.
+	•	Le modèle prédit la note de satisfaction (0–10).
+	•	L’IA générative valide la cohérence de cette note à partir des données utilisées par le modèle.
+	•	Elle confirme la catégorie finale (neutre vs mauvais, notamment autour de 7,x) pour garantir une classification fiable et éviter de rater une action client.
 
-Déclenchement d’actions
-En cas de note mauvaise / très mauvaise / extrêmement mauvaise, une action est lancée pour résoudre le problème du client.
 
-Zone critique : neutre vs mauvais (autour de 7)
-Autour de 7, une erreur de classement peut empêcher une action alors que le client est bloqué.
-On fixe donc un seuil “7,n” (à ajuster) pour sécuriser cette décision.
-
-Rôle de l’IA générative
-L’IA générative explique la note et le problème probable derrière une mauvaise satisfaction, et confirme le classement dans la zone neutre/mauvais.
 ```
