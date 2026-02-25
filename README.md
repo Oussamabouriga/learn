@@ -1,261 +1,286 @@
 ```
-
-Perfect — now that the baseline XGBoost training works, let’s add exactly the two things you asked for:
-	1.	SHAP (feature importance + explanation)
-	2.	Predict your new_rows example with the trained model (xgb_reg)
-
-I’ll keep it clean, notebook-style, no functions ✅
-
-⸻
-
-12) SHAP for feature importance (global + local)
-
-12.1 Install/import SHAP (if needed)
-
-# If SHAP is not installed, run once:
-# !pip install shap
-
-# ==============================
-# 12) Imports for SHAP
-# ==============================
-import shap
-import matplotlib.pyplot as plt
+# ============================================================
+# 0) Imports (prediction + local explanation with SHAP)
+# ============================================================
 import numpy as np
 import pandas as pd
+import shap
+import matplotlib.pyplot as plt
+
+# (optional, nicer display in notebooks)
+pd.set_option("display.max_columns", 200)
+pd.set_option("display.width", 200)
 
 
-⸻
+# ============================================================
+# 1) Your exact new row (copied from your image)
+#    Keep values exactly as you want the model to see them
+# ============================================================
+new_rows = [
+    {
+        "PARCOURS_FINAL": "HORS_APPLE_EE",
+        "PARCOURS_INITIAL": "HORS_APPLE_EE",
+        "tarif": 19.99,
+        "Nombre_sisnitre_client": 1,
+        "Nombre_sisnitre_accepte_client": 1,
+        "Nombre_sisnitre_refuse_client": np.nan,
+        "Nombre_sisnitre_sans_suite_client": np.nan,
+        "code_postal": 59700,
 
-12.2 Build SHAP explainer on your trained baseline model
+        "operating_system": "Android",
+        "marque": "Google",
+        "model": "Pixel 7 Pro",
+        "ancienneté_de_contrat": 509555,
+        "garantie": "Dommage",
+        "Age": 43,
+        "dossier_complet": 1,
+        "decision_ai": 0,
+        "nombre_prestation_ko": 0,
+        "Nbr_ticket_pieces": 0,
+        "Nbr_ticket_information": 4,
+        "list_prest": "ADVANCED_SWAP",
+        "delai_declaration": 279000,
+        "delai_de_completude": np.nan,
+        "delai_decision": 13090,
+        "delai_reparation": 4,
+        "delai_indemnisation": 4,
+        "montant_indem": np.nan,
+        "delai_Sinistre": 602000
+    }
+]
 
-# ==============================
-# 12.2) Build SHAP explainer
-# ==============================
-# xgb_reg is your trained baseline model
-explainer = shap.TreeExplainer(xgb_reg)
+X_new = pd.DataFrame(new_rows).copy()
 
-print("SHAP explainer created ✅")
-
-
-⸻
-
-12.3 SHAP values on a sample of train data (faster + enough for global importance)
-
-# ==============================
-# 12.3) Compute SHAP values on train sample
-# ==============================
-sample_n = 500 if len(X_train_encoded) > 500 else len(X_train_encoded)
-
-X_shap_sample = X_train_encoded.sample(sample_n, random_state=42).copy()
-
-# Make sure columns are strings (safe)
-X_shap_sample.columns = X_shap_sample.columns.astype(str)
-
-shap_values_sample = explainer.shap_values(X_shap_sample)
-
-print("X_shap_sample shape:", X_shap_sample.shape)
-print("SHAP values shape:", np.array(shap_values_sample).shape)
-print("SHAP values computed ✅")
-
-
-⸻
-
-12.4 SHAP summary plot (best global feature importance view)
-
-# ==============================
-# 12.4) SHAP summary plot (global importance)
-# ==============================
-shap.summary_plot(shap_values_sample, X_shap_sample, show=True)
-
-How to read it (quick)
-	•	Top rows = most important features globally
-	•	Right (positive SHAP) = pushes prediction higher
-	•	Left (negative SHAP) = pushes prediction lower
-	•	Red = high feature value, Blue = low feature value
-
-⸻
-
-12.5 SHAP bar plot (simple ranked feature importance)
-
-# ==============================
-# 12.5) SHAP bar plot (mean |SHAP|)
-# ==============================
-shap.summary_plot(shap_values_sample, X_shap_sample, plot_type="bar", show=True)
-
-This gives a simple ranking like feature importance, but based on SHAP (usually better than raw tree importance).
-
-⸻
-
-12.6 SHAP feature importance table (top features in dataframe)
-
-# ==============================
-# 12.6) SHAP importance table (dataframe)
-# ==============================
-shap_importance_df = pd.DataFrame({
-    "feature": X_shap_sample.columns.astype(str),
-    "mean_abs_shap": np.abs(shap_values_sample).mean(axis=0)
-}).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
-
-print("Top 20 features by SHAP importance:")
-display(shap_importance_df.head(20))
+print("Raw X_new shape:", X_new.shape)
+display(X_new)
 
 
-⸻
+# ============================================================
+# 2) Apply the SAME preprocessing logic as training
+#    (zero -> np.nan only for selected business columns)
+#    Edit this list to match what you used during training
+# ============================================================
+zero_to_nan_cols = [
+    "Nombre_sisnitre_refuse_client",
+    "Nombre_sisnitre_sans_suite_client",
+    "delai_de_completude",
+    "montant_indem"
+]
 
-13) Predict your new_rows example with the trained model
-
-Since you already said your new_rows block works, I’ll give you the prediction block + SHAP explanation for that example.
-
-This assumes you already transformed it into X_new_encoded using the same encoding steps and aligned columns to X_train_encoded.columns.
-
-⸻
-
-13.1 Final checks + predict new example
-
-# ==============================
-# 13.1) Predict on new example row(s)
-# ==============================
-print("X_new_encoded shape:", X_new_encoded.shape)
-print("Expected train shape (#features):", X_train_encoded.shape[1])
-
-# Ensure exact same columns/order as train (important)
-X_new_encoded = X_new_encoded.reindex(columns=X_train_encoded.columns, fill_value=0).copy()
-
-# Predict
-new_pred = xgb_reg.predict(X_new_encoded)
-
-# Optional: clip to business range (0..10) if your target is evaluate_note
-new_pred_clipped = np.clip(new_pred, 0, 10)
-
-print("Raw prediction(s):", new_pred)
-print("Clipped prediction(s) [0,10]:", new_pred_clipped)
+for c in zero_to_nan_cols:
+    if c in X_new.columns:
+        X_new[c] = pd.to_numeric(X_new[c], errors="coerce")
+        X_new.loc[X_new[c] == 0, c] = np.nan
 
 
-⸻
-
-13.2 Show prediction nicely beside your input row
-
-# ==============================
-# 13.2) Display input + prediction together
-# ==============================
-new_rows_preview = pd.DataFrame(new_rows).copy()
-
-new_rows_preview["predicted_evaluate_note_raw"] = new_pred
-new_rows_preview["predicted_evaluate_note_clipped_0_10"] = new_pred_clipped
-
-display(new_rows_preview)
+# ============================================================
+# 3) Force categorical columns (same as training)
+# ============================================================
+if "force_categorical_cols" in globals():
+    for c in force_categorical_cols:
+        if c in X_new.columns:
+            X_new[c] = X_new[c].astype("string")
 
 
-⸻
+# ============================================================
+# 4) Frequency / Count Encoding (same maps from TRAIN only)
+#    Requires: encoding_artifacts["frequency_encoding_maps"]
+# ============================================================
+freq_maps = encoding_artifacts.get("frequency_encoding_maps", {})
 
-14) SHAP explanation for your new example (why this prediction?)
+for c in freq_encode_cols:
+    if c in X_new.columns:
+        X_new[c] = X_new[c].astype("string")
+        X_new[f"{c}__freq"] = X_new[c].map(freq_maps.get(c, {})).fillna(0).astype(float)
 
-This explains which features pushed the prediction up/down for that specific row.
-
-14.1 Compute SHAP values for X_new_encoded
-
-# ==============================
-# 14.1) SHAP for the new example row(s)
-# ==============================
-shap_values_new = explainer.shap_values(X_new_encoded)
-
-print("Prediction (raw):", float(new_pred[0]))
-print("Prediction (clipped):", float(new_pred_clipped[0]))
-print("SHAP values for new row computed ✅")
+# Drop original frequency-encoded columns
+freq_drop_cols = [c for c in freq_encode_cols if c in X_new.columns]
+if len(freq_drop_cols) > 0:
+    X_new = X_new.drop(columns=freq_drop_cols)
 
 
-⸻
+# ============================================================
+# 5) Target Encoding (same maps from TRAIN only)
+#    Requires: encoding_artifacts["target_encoding_maps"]
+# ============================================================
+te_maps = encoding_artifacts.get("target_encoding_maps", {})
+global_te_mean = encoding_artifacts.get("target_encoding_global_mean", np.nan)
 
-14.2 SHAP contributions table for the first new row (best guaranteed output)
+for c in target_encode_cols:
+    if c in X_new.columns:
+        X_new[c] = X_new[c].astype("string")
+        X_new[f"{c}__te"] = X_new[c].map(te_maps.get(c, {})).fillna(global_te_mean).astype(float)
 
-# ==============================
-# 14.2) SHAP contribution table for first new row
-# ==============================
-shap_new_df = pd.DataFrame({
-    "feature": X_new_encoded.columns.astype(str),
-    "feature_value": X_new_encoded.iloc[0].values,
-    "shap_value": shap_values_new[0]
-})
+# Drop original target-encoded columns
+te_drop_cols = [c for c in target_encode_cols if c in X_new.columns]
+if len(te_drop_cols) > 0:
+    X_new = X_new.drop(columns=te_drop_cols)
 
-shap_new_df["abs_shap"] = shap_new_df["shap_value"].abs()
 
-# Sort by strongest effect
-shap_new_df = shap_new_df.sort_values("abs_shap", ascending=False).reset_index(drop=True)
+# ============================================================
+# 6) One-Hot Encoding (same fitted OHE from training)
+#    Requires: encoding_artifacts["onehot_encoder"]
+# ============================================================
+if len(onehot_cols) > 0:
+    # Make sure all onehot columns exist
+    for c in onehot_cols:
+        if c not in X_new.columns:
+            X_new[c] = pd.Series([pd.NA] * len(X_new), dtype="string")
+        else:
+            X_new[c] = X_new[c].astype("string")
 
-print("Top 20 feature contributions for this prediction:")
-display(shap_new_df.head(20))
+    ohe = encoding_artifacts.get("onehot_encoder", None)
+    if ohe is None:
+        raise ValueError("Missing encoding_artifacts['onehot_encoder']. Save the fitted OneHotEncoder from training first.")
 
-How to read this table
-	•	shap_value > 0 → feature pushes prediction up
-	•	shap_value < 0 → feature pushes prediction down
-	•	larger abs_shap → stronger impact
+    X_new_ohe_arr = ohe.transform(X_new[onehot_cols])
 
-⸻
+    if hasattr(X_new_ohe_arr, "toarray"):
+        X_new_ohe_arr = X_new_ohe_arr.toarray()
 
-14.3 Waterfall plot for your example (visual explanation)
+    ohe_feature_names = ohe.get_feature_names_out(onehot_cols).tolist()
 
-# ==============================
-# 14.3) SHAP waterfall plot (single row explanation)
-# ==============================
-# Some SHAP versions differ; this block tries the modern plot first
-try:
-    base_value = explainer.expected_value
-    if isinstance(base_value, (list, np.ndarray)):
-        base_value = base_value[0]
-
-    single_explanation = shap.Explanation(
-        values=shap_values_new[0],
-        base_values=base_value,
-        data=X_new_encoded.iloc[0].values,
-        feature_names=X_new_encoded.columns.astype(str).tolist()
+    X_new_ohe = pd.DataFrame(
+        X_new_ohe_arr,
+        columns=ohe_feature_names,
+        index=X_new.index
     )
 
-    shap.plots.waterfall(single_explanation, max_display=20)
-
-except Exception as e:
-    print("Waterfall plot not available in this SHAP version:", e)
-    print("Use the contribution table above (14.2), it gives the same logic.")
+    X_new = X_new.drop(columns=[c for c in onehot_cols if c in X_new.columns])
+    X_new = pd.concat([X_new, X_new_ohe], axis=1)
 
 
-⸻
+# ============================================================
+# 7) Apply SAME numeric transforms as training (if used)
+#    IMPORTANT: Put the exact list you used before
+# ============================================================
+# Example: if you used log1p on some columns during training, list them here.
+# If you did NOT use log transforms, keep this list empty.
+log_transform_cols = [
+    # "delai_declaration",
+    # "delai_decision",
+    # "delai_Sinistre",
+    # "ancienneté_de_contrat",
+    # "montant_indem"
+]
 
-15) (Optional) Compare XGBoost built-in importance vs SHAP importance
+for c in log_transform_cols:
+    if c in X_new.columns:
+        X_new[c] = pd.to_numeric(X_new[c], errors="coerce")
+        X_new.loc[X_new[c] <= -1, c] = np.nan
+        X_new[c] = np.log1p(X_new[c])
 
-This helps you see the difference between model split importance and actual prediction contribution importance.
 
-# ==============================
-# 15) Compare built-in importance vs SHAP importance
-# ==============================
-xgb_importance_df = pd.DataFrame({
-    "feature": X_train_encoded.columns.astype(str),
-    "xgb_importance": xgb_reg.feature_importances_
-}).sort_values("xgb_importance", ascending=False)
-
-compare_importance_df = (
-    xgb_importance_df.merge(shap_importance_df, on="feature", how="outer")
-    .fillna(0)
-    .sort_values("mean_abs_shap", ascending=False)
-    .reset_index(drop=True)
+# ============================================================
+# 8) Clean feature names (XGBoost requirement)
+#    Avoid chars like [, ], <
+# ============================================================
+X_new.columns = (
+    X_new.columns.astype(str)
+    .str.replace("[", "(", regex=False)
+    .str.replace("]", ")", regex=False)
+    .str.replace("<", "lt_", regex=False)
+    .str.replace(">", "gt_", regex=False)
 )
 
-print("Top features by SHAP (with XGBoost built-in importance side by side):")
-display(compare_importance_df.head(20))
+# Convert all to numeric float
+for c in X_new.columns:
+    X_new[c] = pd.to_numeric(X_new[c], errors="coerce")
+X_new = X_new.astype(float)
 
 
-⸻
+# ============================================================
+# 9) Align EXACTLY to training matrix columns (same order)
+# ============================================================
+X_new_encoded = X_new.reindex(columns=X_train_encoded.columns, fill_value=0).copy()
+X_new_encoded.columns = X_new_encoded.columns.astype(str)
+X_new_encoded = X_new_encoded.astype(float)
 
-16) Quick notes (important for your workflow)
-	•	XGBoost feature_importances_ = how often/usefully features split trees
-	•	SHAP = how much features actually contribute to predictions
-➡️ For explanation, SHAP is better
-	•	For predicting new_rows, always keep:
-	•	same encodings
-	•	same one-hot fitted encoder (ohe)
-	•	same frequency/target maps
-	•	same column cleaning
-	•	same column order as X_train_encoded
+print("X_new_encoded.shape:", X_new_encoded.shape)
+print("Expected same n_features as train:", X_train_encoded.shape[1])
+display(X_new_encoded.head())
 
-⸻
 
-If you want next, I can give you the weighted baseline (imbalanced regression target) block in the same style (no functions), then a small Random Search block (fast and practical).
+# ============================================================
+# 10) Predict with trained model
+# ============================================================
+pred_new = xgb_reg.predict(X_new_encoded)
+
+# If your target is evaluate_note (0..10), clipping is often useful
+pred_new_clipped = np.clip(pred_new, 0, 10)
+
+print("\n✅ Predicted value (raw):", pred_new[0])
+print("✅ Predicted value (clipped 0..10):", pred_new_clipped[0])
+
+
+# ============================================================
+# 11) SHAP local explanation for THIS prediction
+#    This shows which features pushed prediction up/down
+# ============================================================
+# TreeExplainer works well with XGBoost tree models
+explainer = shap.TreeExplainer(xgb_reg)
+
+# Compute SHAP values for the single row
+shap_values_single = explainer.shap_values(X_new_encoded)
+
+# Expected value (base value)
+base_value = explainer.expected_value
+
+# If output is array-like (sometimes happens), take scalar
+if isinstance(base_value, (list, np.ndarray)):
+    # for single-output regression this is usually length-1
+    base_value_scalar = float(np.array(base_value).reshape(-1)[0])
+else:
+    base_value_scalar = float(base_value)
+
+# Build a local importance table (absolute contribution ranking)
+local_shap_df = pd.DataFrame({
+    "feature": X_new_encoded.columns,
+    "feature_value": X_new_encoded.iloc[0].values,
+    "shap_value": shap_values_single[0]
+})
+
+local_shap_df["abs_shap"] = local_shap_df["shap_value"].abs()
+local_shap_df = local_shap_df.sort_values("abs_shap", ascending=False).reset_index(drop=True)
+
+print("\n=== Local explanation for this row (top features that influenced prediction) ===")
+print("Base value (average model output):", base_value_scalar)
+print("Prediction from model:", float(pred_new[0]))
+display(local_shap_df.head(20))
+
+
+# ============================================================
+# 12) SHAP waterfall plot (best for one-row explanation)
+#    This visually shows why the model chose this prediction
+# ============================================================
+# Preferred modern API
+try:
+    shap_explanation = shap.Explanation(
+        values=shap_values_single[0],
+        base_values=base_value_scalar,
+        data=X_new_encoded.iloc[0].values,
+        feature_names=X_new_encoded.columns.tolist()
+    )
+    shap.plots.waterfall(shap_explanation, max_display=20)
+    plt.show()
+except Exception as e:
+    print("Waterfall plot failed, falling back to summary text.")
+    print("Reason:", e)
+
+
+# ============================================================
+# 13) Optional: SHAP force plot (interactive in notebook)
+# ============================================================
+try:
+    shap.initjs()
+    force_plot = shap.force_plot(
+        base_value_scalar,
+        shap_values_single[0],
+        X_new_encoded.iloc[0],
+        matplotlib=True,   # static image in notebook
+        show=True
+    )
+except Exception as e:
+    print("Force plot skipped:", e)
+
 ```
