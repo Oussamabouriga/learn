@@ -1,161 +1,102 @@
 ```
-# ============================================================
-# 0) Imports (prediction + local explanation with SHAP)
-# ============================================================
-import numpy as np
-import pandas as pd
-import shap
-import matplotlib.pyplot as plt
+Yes — the error is clear from your screenshot ✅
 
-# (optional, nicer display in notebooks)
-pd.set_option("display.max_columns", 200)
-pd.set_option("display.width", 200)
+Why it failed
 
+You are doing:
 
-# ============================================================
-# 1) Your exact new row (copied from your image)
-#    Keep values exactly as you want the model to see them
-# ============================================================
-new_rows = [
-    {
-        "PARCOURS_FINAL": "HORS_APPLE_EE",
-        "PARCOURS_INITIAL": "HORS_APPLE_EE",
-        "tarif": 19.99,
-        "Nombre_sisnitre_client": 1,
-        "Nombre_sisnitre_accepte_client": 1,
-        "Nombre_sisnitre_refuse_client": np.nan,
-        "Nombre_sisnitre_sans_suite_client": np.nan,
-        "code_postal": 59700,
+ohe = encoding_artifacts.get("onehot_encoder", None)
 
-        "operating_system": "Android",
-        "marque": "Google",
-        "model": "Pixel 7 Pro",
-        "ancienneté_de_contrat": 509555,
-        "garantie": "Dommage",
-        "Age": 43,
-        "dossier_complet": 1,
-        "decision_ai": 0,
-        "nombre_prestation_ko": 0,
-        "Nbr_ticket_pieces": 0,
-        "Nbr_ticket_information": 4,
-        "list_prest": "ADVANCED_SWAP",
-        "delai_declaration": 279000,
-        "delai_de_completude": np.nan,
-        "delai_decision": 13090,
-        "delai_reparation": 4,
-        "delai_indemnisation": 4,
-        "montant_indem": np.nan,
-        "delai_Sinistre": 602000
-    }
-]
+But in your encoding_artifacts, the fitted encoder object was not saved under "onehot_encoder" (or not saved at all).
 
-X_new = pd.DataFrame(new_rows).copy()
+So we’ll fix it in a robust way:
+	•	Try multiple possible keys for the fitted OHE object
+	•	If not found, use a safe fallback with pd.get_dummies(...) + align to X_train_encoded.columns
+	•	Then continue with:
+	•	X_new_encoded
+	•	prediction
+	•	SHAP local explanation for this exact row
 
-print("Raw X_new shape:", X_new.shape)
-display(X_new)
+⸻
 
+✅ Replace your broken OHE block with this (fixed) + continue after it
 
 # ============================================================
-# 2) Apply the SAME preprocessing logic as training
-#    (zero -> np.nan only for selected business columns)
-#    Edit this list to match what you used during training
+# One-Hot Encoding (same fitted OHE from training) - FIXED
+# Robust version: tries to find saved OHE object, otherwise fallback
 # ============================================================
-zero_to_nan_cols = [
-    "Nombre_sisnitre_refuse_client",
-    "Nombre_sisnitre_sans_suite_client",
-    "delai_de_completude",
-    "montant_indem"
-]
 
-for c in zero_to_nan_cols:
-    if c in X_new.columns:
-        X_new[c] = pd.to_numeric(X_new[c], errors="coerce")
-        X_new.loc[X_new[c] == 0, c] = np.nan
-
-
-# ============================================================
-# 3) Force categorical columns (same as training)
-# ============================================================
-if "force_categorical_cols" in globals():
-    for c in force_categorical_cols:
-        if c in X_new.columns:
-            X_new[c] = X_new[c].astype("string")
-
-
-# ============================================================
-# 4) Frequency / Count Encoding (same maps from TRAIN only)
-#    Requires: encoding_artifacts["frequency_encoding_maps"]
-# ============================================================
-freq_maps = encoding_artifacts.get("frequency_encoding_maps", {})
-
-for c in freq_encode_cols:
-    if c in X_new.columns:
-        X_new[c] = X_new[c].astype("string")
-        X_new[f"{c}__freq"] = X_new[c].map(freq_maps.get(c, {})).fillna(0).astype(float)
-
-# Drop original frequency-encoded columns
-freq_drop_cols = [c for c in freq_encode_cols if c in X_new.columns]
-if len(freq_drop_cols) > 0:
-    X_new = X_new.drop(columns=freq_drop_cols)
-
-
-# ============================================================
-# 5) Target Encoding (same maps from TRAIN only)
-#    Requires: encoding_artifacts["target_encoding_maps"]
-# ============================================================
-te_maps = encoding_artifacts.get("target_encoding_maps", {})
-global_te_mean = encoding_artifacts.get("target_encoding_global_mean", np.nan)
-
-for c in target_encode_cols:
-    if c in X_new.columns:
-        X_new[c] = X_new[c].astype("string")
-        X_new[f"{c}__te"] = X_new[c].map(te_maps.get(c, {})).fillna(global_te_mean).astype(float)
-
-# Drop original target-encoded columns
-te_drop_cols = [c for c in target_encode_cols if c in X_new.columns]
-if len(te_drop_cols) > 0:
-    X_new = X_new.drop(columns=te_drop_cols)
-
-
-# ============================================================
-# 6) One-Hot Encoding (same fitted OHE from training)
-#    Requires: encoding_artifacts["onehot_encoder"]
-# ============================================================
 if len(onehot_cols) > 0:
-    # Make sure all onehot columns exist
+    # Make sure all onehot columns exist in X_new
     for c in onehot_cols:
         if c not in X_new.columns:
             X_new[c] = pd.Series([pd.NA] * len(X_new), dtype="string")
         else:
             X_new[c] = X_new[c].astype("string")
 
-    ohe = encoding_artifacts.get("onehot_encoder", None)
-    if ohe is None:
-        raise ValueError("Missing encoding_artifacts['onehot_encoder']. Save the fitted OneHotEncoder from training first.")
+    # Try multiple possible keys (depending on what you saved before)
+    ohe = None
+    for possible_key in [
+        "onehot_encoder",          # what we expected
+        "ohe",                     # common name
+        "one_hot_encoder",         # possible variant
+        "fitted_onehot_encoder"    # possible variant
+    ]:
+        if possible_key in encoding_artifacts and encoding_artifacts[possible_key] is not None:
+            ohe = encoding_artifacts[possible_key]
+            print(f"Using fitted OHE from encoding_artifacts['{possible_key}'] ✅")
+            break
 
-    X_new_ohe_arr = ohe.transform(X_new[onehot_cols])
+    # -----------------------------
+    # CASE A: fitted OHE exists
+    # -----------------------------
+    if ohe is not None:
+        X_new_ohe_arr = ohe.transform(X_new[onehot_cols])
 
-    if hasattr(X_new_ohe_arr, "toarray"):
-        X_new_ohe_arr = X_new_ohe_arr.toarray()
+        if hasattr(X_new_ohe_arr, "toarray"):
+            X_new_ohe_arr = X_new_ohe_arr.toarray()
 
-    ohe_feature_names = ohe.get_feature_names_out(onehot_cols).tolist()
+        ohe_feature_names = ohe.get_feature_names_out(onehot_cols).tolist()
 
-    X_new_ohe = pd.DataFrame(
-        X_new_ohe_arr,
-        columns=ohe_feature_names,
-        index=X_new.index
-    )
+        X_new_ohe = pd.DataFrame(
+            X_new_ohe_arr,
+            columns=ohe_feature_names,
+            index=X_new.index
+        )
 
-    X_new = X_new.drop(columns=[c for c in onehot_cols if c in X_new.columns])
-    X_new = pd.concat([X_new, X_new_ohe], axis=1)
+        # Drop original onehot cols, append encoded cols
+        X_new = X_new.drop(columns=[c for c in onehot_cols if c in X_new.columns])
+        X_new = pd.concat([X_new, X_new_ohe], axis=1)
 
+    # -----------------------------
+    # CASE B: fitted OHE NOT saved -> fallback with pd.get_dummies
+    # (works if we align later to X_train_encoded columns)
+    # -----------------------------
+    else:
+        print("⚠️ Fitted OneHotEncoder not found in encoding_artifacts.")
+        print("⚠️ Using fallback: pd.get_dummies on new row + align to training columns.")
+
+        X_new = pd.get_dummies(
+            X_new,
+            columns=[c for c in onehot_cols if c in X_new.columns],
+            dummy_na=False
+        )
+
+        # IMPORTANT:
+        # We will align to X_train_encoded columns later, so missing OHE columns become 0.
+        # Unknown new categories (not seen in train) will not create matching train columns, so they effectively become all-zeros.
+
+
+⸻
+
+✅ Add this code AFTER the OHE block (encode finish → align → predict → SHAP)
 
 # ============================================================
-# 7) Apply SAME numeric transforms as training (if used)
-#    IMPORTANT: Put the exact list you used before
+# Continue encoding after OHE
 # ============================================================
-# Example: if you used log1p on some columns during training, list them here.
-# If you did NOT use log transforms, keep this list empty.
+
+# 1) Optional log transforms (ONLY if you used them during training)
+# Put the EXACT same columns you transformed during training
 log_transform_cols = [
     # "delai_declaration",
     # "delai_decision",
@@ -171,10 +112,7 @@ for c in log_transform_cols:
         X_new[c] = np.log1p(X_new[c])
 
 
-# ============================================================
-# 8) Clean feature names (XGBoost requirement)
-#    Avoid chars like [, ], <
-# ============================================================
+# 2) Clean feature names (XGBoost cannot accept some special chars)
 X_new.columns = (
     X_new.columns.astype(str)
     .str.replace("[", "(", regex=False)
@@ -183,59 +121,63 @@ X_new.columns = (
     .str.replace(">", "gt_", regex=False)
 )
 
-# Convert all to numeric float
+# 3) Convert to numeric
 for c in X_new.columns:
     X_new[c] = pd.to_numeric(X_new[c], errors="coerce")
 X_new = X_new.astype(float)
 
+print("X_new shape BEFORE align:", X_new.shape)
+
 
 # ============================================================
-# 9) Align EXACTLY to training matrix columns (same order)
+# Align EXACTLY with training columns (VERY IMPORTANT)
 # ============================================================
+# This is what makes the fallback OHE strategy work too.
 X_new_encoded = X_new.reindex(columns=X_train_encoded.columns, fill_value=0).copy()
+
+# ensure types are correct
 X_new_encoded.columns = X_new_encoded.columns.astype(str)
 X_new_encoded = X_new_encoded.astype(float)
 
 print("X_new_encoded.shape:", X_new_encoded.shape)
-print("Expected same n_features as train:", X_train_encoded.shape[1])
-display(X_new_encoded.head())
+print("X_train_encoded.shape:", X_train_encoded.shape)
+print("Same number of features? ->", X_new_encoded.shape[1] == X_train_encoded.shape[1])
+
+display(X_new_encoded.head(1))
 
 
 # ============================================================
-# 10) Predict with trained model
+# Predict with your trained model
 # ============================================================
 pred_new = xgb_reg.predict(X_new_encoded)
-
-# If your target is evaluate_note (0..10), clipping is often useful
 pred_new_clipped = np.clip(pred_new, 0, 10)
 
-print("\n✅ Predicted value (raw):", pred_new[0])
-print("✅ Predicted value (clipped 0..10):", pred_new_clipped[0])
+print("\n✅ Predicted value (raw):", float(pred_new[0]))
+print("✅ Predicted value (clipped 0..10):", float(pred_new_clipped[0]))
 
 
 # ============================================================
-# 11) SHAP local explanation for THIS prediction
-#    This shows which features pushed prediction up/down
+# SHAP local explanation for THIS row (why this prediction?)
 # ============================================================
-# TreeExplainer works well with XGBoost tree models
+import shap
+import matplotlib.pyplot as plt
+
+# TreeExplainer for XGBoost tree model
 explainer = shap.TreeExplainer(xgb_reg)
 
-# Compute SHAP values for the single row
+# shap values for single row
 shap_values_single = explainer.shap_values(X_new_encoded)
 
-# Expected value (base value)
+# base value
 base_value = explainer.expected_value
-
-# If output is array-like (sometimes happens), take scalar
 if isinstance(base_value, (list, np.ndarray)):
-    # for single-output regression this is usually length-1
-    base_value_scalar = float(np.array(base_value).reshape(-1)[0])
+    base_value = float(np.array(base_value).reshape(-1)[0])
 else:
-    base_value_scalar = float(base_value)
+    base_value = float(base_value)
 
-# Build a local importance table (absolute contribution ranking)
+# Build local feature-importance table for this row
 local_shap_df = pd.DataFrame({
-    "feature": X_new_encoded.columns,
+    "feature": X_new_encoded.columns.astype(str),
     "feature_value": X_new_encoded.iloc[0].values,
     "shap_value": shap_values_single[0]
 })
@@ -243,44 +185,72 @@ local_shap_df = pd.DataFrame({
 local_shap_df["abs_shap"] = local_shap_df["shap_value"].abs()
 local_shap_df = local_shap_df.sort_values("abs_shap", ascending=False).reset_index(drop=True)
 
-print("\n=== Local explanation for this row (top features that influenced prediction) ===")
-print("Base value (average model output):", base_value_scalar)
-print("Prediction from model:", float(pred_new[0]))
+print("\n=== Top features influencing THIS prediction (local SHAP) ===")
+print("Base value (average prediction):", base_value)
+print("Model prediction (raw):", float(pred_new[0]))
+print("Model prediction (clipped):", float(pred_new_clipped[0]))
 display(local_shap_df.head(20))
 
 
 # ============================================================
-# 12) SHAP waterfall plot (best for one-row explanation)
-#    This visually shows why the model chose this prediction
+# SHAP waterfall plot (best for one row)
 # ============================================================
-# Preferred modern API
 try:
     shap_explanation = shap.Explanation(
         values=shap_values_single[0],
-        base_values=base_value_scalar,
+        base_values=base_value,
         data=X_new_encoded.iloc[0].values,
         feature_names=X_new_encoded.columns.tolist()
     )
     shap.plots.waterfall(shap_explanation, max_display=20)
     plt.show()
 except Exception as e:
-    print("Waterfall plot failed, falling back to summary text.")
-    print("Reason:", e)
+    print("Waterfall plot skipped:", e)
 
 
 # ============================================================
-# 13) Optional: SHAP force plot (interactive in notebook)
+# Optional: show top positive and top negative contributions
 # ============================================================
-try:
-    shap.initjs()
-    force_plot = shap.force_plot(
-        base_value_scalar,
-        shap_values_single[0],
-        X_new_encoded.iloc[0],
-        matplotlib=True,   # static image in notebook
-        show=True
-    )
-except Exception as e:
-    print("Force plot skipped:", e)
+top_positive = local_shap_df.sort_values("shap_value", ascending=False).head(10)
+top_negative = local_shap_df.sort_values("shap_value", ascending=True).head(10)
+
+print("\nTop positive contributors (push prediction UP):")
+display(top_positive[["feature", "feature_value", "shap_value"]])
+
+print("\nTop negative contributors (push prediction DOWN):")
+display(top_negative[["feature", "feature_value", "shap_value"]])
+
+
+⸻
+
+Important note (so you understand exactly)
+
+If fitted OHE was not saved
+
+The fallback (pd.get_dummies) can still work because we align to X_train_encoded.columns.
+
+That means:
+	•	known one-hot columns from training are matched ✅
+	•	missing ones are filled with 0 ✅
+	•	unseen categories in new row become “no known category activated” (all zeros for that feature family) ✅
+
+This is acceptable for prediction, but best practice is still to save the fitted OneHotEncoder.
+
+⸻
+
+(Optional but recommended) Save the encoder during training next time
+
+In your training encoding block, after fitting OHE, add:
+
+encoding_artifacts["onehot_encoder"] = ohe
+
+Then future new-row encoding will be exact and easier.
+
+⸻
+
+If you want, next I can give you one more small block to print a human-readable explanation like:
+	•	“Prediction increased mostly because delai_Sinistre, tarif, …”
+	•	“Prediction decreased because garantie__freq, decision_ai, …”
+
 
 ```
