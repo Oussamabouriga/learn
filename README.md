@@ -1,319 +1,212 @@
 ```
-
 # ============================================================
-# PLOTS DES MÉTRIQUES (style bleu) + F1 (optionnel via classes)
+# ACCURACY (%) FOR THE 4 MODELS + PLOT (0 -> 100%)
+# ============================================================
+# This computes regression "accuracy" using tolerance-based accuracy:
+# A prediction is considered correct if |y_true - y_pred| <= tolerance
+#
+# We will compute:
+# - Accuracy@±0.5
+# - Accuracy@±1.0
+#
+# Expected prediction variables from your previous code:
+#   Model 1: pred_test_clipped (or pred_test_baseline_w_clip if your model1 naming changed)
+#   Model 2: pred_test_baseline_w_clip   (weighted baseline)
+#   Model 3: pred_test_random_w_clip     (random search weighted)
+#   Model 4: pred_test_grid_w_clip       (small grid weighted)
+#
+# IMPORTANT:
+# If your Model 1 variable is named differently, adjust below.
 # ============================================================
 
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from sklearn.metrics import (
-    accuracy_score,
-    precision_score,
-    recall_score,
-    f1_score,
-    classification_report
-)
-
 # ------------------------------------------------------------
-# 1) Couleur "Blue 3" (ajuste si tu veux exactement ton code couleur)
+# 1) Blue colors (same style family)
 # ------------------------------------------------------------
-BLUE_3 = "#3B82F6"   # bleu principal
+BLUE_3 = "#3B82F6"
 BLUE_3_DARK = "#1D4ED8"
 BLUE_3_LIGHT = "#93C5FD"
 GRID_BLUE = "#DBEAFE"
 
 # ------------------------------------------------------------
-# 2) Vérifier que la table des métriques test existe
-#    (créée dans ton code précédent)
+# 2) Select predictions for each model (edit only if names differ)
 # ------------------------------------------------------------
-# attendu: saved_metrics_all_models_test ou metrics_all_models_test
-if "saved_metrics_all_models_test" in globals():
-    metrics_plot_df = saved_metrics_all_models_test.copy()
+# --- Model 1 (normal baseline)
+if "pred_test_clipped" in globals():
+    pred_test_model1 = np.asarray(pred_test_clipped, dtype=float)
+elif "baseline_pred_test" in globals():
+    pred_test_model1 = np.asarray(baseline_pred_test, dtype=float)
 else:
-    metrics_plot_df = metrics_all_models_test.copy()
+    raise NameError("Model 1 test predictions not found. Expected 'pred_test_clipped' or 'baseline_pred_test'.")
 
-display(metrics_plot_df)
+# --- Model 2 (weighted baseline)
+if "pred_test_baseline_w_clip" in globals():
+    pred_test_model2 = np.asarray(pred_test_baseline_w_clip, dtype=float)
+else:
+    raise NameError("Model 2 test predictions not found. Expected 'pred_test_baseline_w_clip'.")
 
-# ------------------------------------------------------------
-# 3) Préparer un tableau "long" pour tracer les métriques de régression
-# ------------------------------------------------------------
-# Colonnes attendues:
-# - Metric
-# - Model1_BaselineWeighted_Test
-# - Model2_RandomSearchWeighted_Test
-# - Model3_SmallGridWeighted_Test
+# --- Model 3 (random search weighted)
+if "pred_test_random_w_clip" in globals():
+    pred_test_model3 = np.asarray(pred_test_random_w_clip, dtype=float)
+else:
+    raise NameError("Model 3 test predictions not found. Expected 'pred_test_random_w_clip'.")
 
-reg_plot_df = metrics_plot_df.copy()
+# --- Model 4 (small grid search weighted)
+if "pred_test_grid_w_clip" in globals():
+    pred_test_model4 = np.asarray(pred_test_grid_w_clip, dtype=float)
+else:
+    raise NameError("Model 4 test predictions not found. Expected 'pred_test_grid_w_clip'.")
 
-# Séparer les métriques "higher is better" / "lower is better"
-higher_better_metrics = ["R2", "ExplainedVariance", "Accuracy@±0.5 (%)", "Accuracy@±1.0 (%)"]
-lower_better_metrics = ["MAE", "MSE", "RMSE", "MedianAE", "MaxError", "MAPE_%", "sMAPE_%"]
+# Ground truth
+y_true_test = np.asarray(y_test, dtype=float)
 
-# ------------------------------------------------------------
-# 4) Plot A — Métriques "Higher is better" (bar chart, bleu)
-# ------------------------------------------------------------
-plot_higher = reg_plot_df[reg_plot_df["Metric"].isin(higher_better_metrics)].copy()
-
-# Long format
-plot_higher_long = plot_higher.melt(
-    id_vars=["Metric", "Better if"],
-    value_vars=[
-        "Model1_BaselineWeighted_Test",
-        "Model2_RandomSearchWeighted_Test",
-        "Model3_SmallGridWeighted_Test"
-    ],
-    var_name="Model",
-    value_name="Value"
-)
-
-# Rename model labels for display
-model_label_map = {
-    "Model1_BaselineWeighted_Test": "Baseline pondéré",
-    "Model2_RandomSearchWeighted_Test": "Random Search pondéré",
-    "Model3_SmallGridWeighted_Test": "Small Grid pondéré",
-}
-plot_higher_long["Model"] = plot_higher_long["Model"].map(model_label_map)
-
-# Create pivot for grouped bars
-pivot_higher = plot_higher_long.pivot(index="Metric", columns="Model", values="Value")
-
-# Plot
-fig, ax = plt.subplots(figsize=(12, 6))
-pivot_higher.plot(kind="bar", ax=ax, color=[BLUE_3_LIGHT, BLUE_3, BLUE_3_DARK], width=0.8)
-
-ax.set_title("Comparaison des métriques (plus élevé = meilleur)", pad=18)
-ax.set_xlabel("Métrique")
-ax.set_ylabel("Valeur")
-ax.set_facecolor("white")
-fig.patch.set_facecolor("white")
-
-# Grid style (bleu)
-ax.grid(True, axis="y", linestyle="--", linewidth=0.8, color=GRID_BLUE, alpha=1.0)
-ax.set_axisbelow(True)
-
-# Border style
-for spine in ax.spines.values():
-    spine.set_visible(True)
-    spine.set_linewidth(1.0)
-    spine.set_color(BLUE_3_LIGHT)
-
-# Labels on bars
-for container in ax.containers:
-    for bar in container:
-        h = bar.get_height()
-        if pd.notna(h):
-            ax.text(
-                bar.get_x() + bar.get_width()/2,
-                h,
-                f"{h:.3f}" if h < 10 else f"{h:.1f}",
-                ha="center",
-                va="bottom",
-                fontsize=8,
-                rotation=0
-            )
-
-plt.xticks(rotation=20, ha="right")
-plt.legend(title="Modèle", frameon=True)
-plt.tight_layout()
-plt.show()
+# Sanity check lengths
+print("Lengths:")
+print("y_test:", len(y_true_test))
+print("Model1:", len(pred_test_model1))
+print("Model2:", len(pred_test_model2))
+print("Model3:", len(pred_test_model3))
+print("Model4:", len(pred_test_model4))
 
 # ------------------------------------------------------------
-# 5) Plot B — Métriques "Lower is better" (bar chart, bleu)
+# 3) Compute accuracy (%) with tolerance (regression accuracy)
 # ------------------------------------------------------------
-plot_lower = reg_plot_df[reg_plot_df["Metric"].isin(lower_better_metrics)].copy()
+tol_05 = 0.5
+tol_10 = 1.0
 
-plot_lower_long = plot_lower.melt(
-    id_vars=["Metric", "Better if"],
-    value_vars=[
-        "Model1_BaselineWeighted_Test",
-        "Model2_RandomSearchWeighted_Test",
-        "Model3_SmallGridWeighted_Test"
+acc_model1_05 = (np.abs(y_true_test - pred_test_model1) <= tol_05).mean() * 100
+acc_model2_05 = (np.abs(y_true_test - pred_test_model2) <= tol_05).mean() * 100
+acc_model3_05 = (np.abs(y_true_test - pred_test_model3) <= tol_05).mean() * 100
+acc_model4_05 = (np.abs(y_true_test - pred_test_model4) <= tol_05).mean() * 100
+
+acc_model1_10 = (np.abs(y_true_test - pred_test_model1) <= tol_10).mean() * 100
+acc_model2_10 = (np.abs(y_true_test - pred_test_model2) <= tol_10).mean() * 100
+acc_model3_10 = (np.abs(y_true_test - pred_test_model3) <= tol_10).mean() * 100
+acc_model4_10 = (np.abs(y_true_test - pred_test_model4) <= tol_10).mean() * 100
+
+# ------------------------------------------------------------
+# 4) Accuracy table (0 -> 100%)
+# ------------------------------------------------------------
+accuracy_4models_df = pd.DataFrame({
+    "Modèle": [
+        "Modèle 1 - Baseline",
+        "Modèle 2 - Weighted",
+        "Modèle 3 - Random Search Weighted",
+        "Modèle 4 - Small Grid Weighted"
     ],
-    var_name="Model",
-    value_name="Value"
-)
-
-plot_lower_long["Model"] = plot_lower_long["Model"].map(model_label_map)
-
-pivot_lower = plot_lower_long.pivot(index="Metric", columns="Model", values="Value")
-
-fig, ax = plt.subplots(figsize=(12, 6))
-pivot_lower.plot(kind="bar", ax=ax, color=[BLUE_3_LIGHT, BLUE_3, BLUE_3_DARK], width=0.8)
-
-ax.set_title("Comparaison des métriques (plus faible = meilleur)", pad=18)
-ax.set_xlabel("Métrique")
-ax.set_ylabel("Valeur")
-ax.set_facecolor("white")
-fig.patch.set_facecolor("white")
-
-# Grid style (bleu)
-ax.grid(True, axis="y", linestyle="--", linewidth=0.8, color=GRID_BLUE, alpha=1.0)
-ax.set_axisbelow(True)
-
-# Border style
-for spine in ax.spines.values():
-    spine.set_visible(True)
-    spine.set_linewidth(1.0)
-    spine.set_color(BLUE_3_LIGHT)
-
-# Labels on bars
-for container in ax.containers:
-    for bar in container:
-        h = bar.get_height()
-        if pd.notna(h):
-            ax.text(
-                bar.get_x() + bar.get_width()/2,
-                h,
-                f"{h:.3f}" if h < 100 else f"{h:.1f}",
-                ha="center",
-                va="bottom",
-                fontsize=8
-            )
-
-plt.xticks(rotation=20, ha="right")
-plt.legend(title="Modèle", frameon=True)
-plt.tight_layout()
-plt.show()
-
-
-# ============================================================
-# 6) OPTIONNEL — F1 / Accuracy / Precision / Recall
-#    (en convertissant la régression en classes métier)
-# ============================================================
-# IMPORTANT:
-# F1 n'est pas adapté à la régression directe.
-# Ici on crée des classes à partir de la note (réelle et prédite).
-
-# --- Vérifie que les prédictions existent
-# (issues de ton code précédent)
-# pred_test_baseline_w_clip
-# pred_test_random_w_clip
-# pred_test_grid_w_clip
-# y_test
-
-# Exemple de classes métier (adapte les seuils selon ton besoin):
-# 0 à <7      = "mauvais"
-# 7 à <8.5    = "neutre"
-# 8.5 à 10    = "satisfait"
-
-y_test_cls = pd.cut(
-    y_test,
-    bins=[-np.inf, 7, 8.5, np.inf],
-    labels=["mauvais", "neutre", "satisfait"],
-    right=False
-)
-
-pred_baseline_cls = pd.cut(
-    pred_test_baseline_w_clip,
-    bins=[-np.inf, 7, 8.5, np.inf],
-    labels=["mauvais", "neutre", "satisfait"],
-    right=False
-)
-
-pred_random_cls = pd.cut(
-    pred_test_random_w_clip,
-    bins=[-np.inf, 7, 8.5, np.inf],
-    labels=["mauvais", "neutre", "satisfait"],
-    right=False
-)
-
-pred_grid_cls = pd.cut(
-    pred_test_grid_w_clip,
-    bins=[-np.inf, 7, 8.5, np.inf],
-    labels=["mauvais", "neutre", "satisfait"],
-    right=False
-)
-
-# --- Metrics classification (macro = équilibré entre classes)
-cls_metrics_df = pd.DataFrame({
-    "Model": ["Baseline pondéré", "Random Search pondéré", "Small Grid pondéré"],
-    "Accuracy": [
-        accuracy_score(y_test_cls, pred_baseline_cls),
-        accuracy_score(y_test_cls, pred_random_cls),
-        accuracy_score(y_test_cls, pred_grid_cls),
+    "Accuracy@±0.5 (%)": [
+        acc_model1_05, acc_model2_05, acc_model3_05, acc_model4_05
     ],
-    "Precision_macro": [
-        precision_score(y_test_cls, pred_baseline_cls, average="macro", zero_division=0),
-        precision_score(y_test_cls, pred_random_cls, average="macro", zero_division=0),
-        precision_score(y_test_cls, pred_grid_cls, average="macro", zero_division=0),
-    ],
-    "Recall_macro": [
-        recall_score(y_test_cls, pred_baseline_cls, average="macro", zero_division=0),
-        recall_score(y_test_cls, pred_random_cls, average="macro", zero_division=0),
-        recall_score(y_test_cls, pred_grid_cls, average="macro", zero_division=0),
-    ],
-    "F1_macro": [
-        f1_score(y_test_cls, pred_baseline_cls, average="macro", zero_division=0),
-        f1_score(y_test_cls, pred_random_cls, average="macro", zero_division=0),
-        f1_score(y_test_cls, pred_grid_cls, average="macro", zero_division=0),
-    ],
-    "F1_weighted": [
-        f1_score(y_test_cls, pred_baseline_cls, average="weighted", zero_division=0),
-        f1_score(y_test_cls, pred_random_cls, average="weighted", zero_division=0),
-        f1_score(y_test_cls, pred_grid_cls, average="weighted", zero_division=0),
-    ],
+    "Accuracy@±1.0 (%)": [
+        acc_model1_10, acc_model2_10, acc_model3_10, acc_model4_10
+    ]
 })
 
-print("=== Metrics de classification (à partir des notes regroupées) ===")
-display(cls_metrics_df)
+print("\n=== Accuracy (%) des 4 modèles (TEST) ===")
+display(accuracy_4models_df)
 
 # ------------------------------------------------------------
-# 7) Plot C — Accuracy / Precision / Recall / F1 (classification dérivée)
+# 5) Plot A — Accuracy@±1.0 only (0 -> 100%)
 # ------------------------------------------------------------
-cls_plot_long = cls_metrics_df.melt(
-    id_vars=["Model"],
-    value_vars=["Accuracy", "Precision_macro", "Recall_macro", "F1_macro", "F1_weighted"],
-    var_name="Metric",
-    value_name="Value"
+fig, ax = plt.subplots(figsize=(11, 6))
+
+bars = ax.bar(
+    accuracy_4models_df["Modèle"],
+    accuracy_4models_df["Accuracy@±1.0 (%)"],
+    color=[BLUE_3_LIGHT, BLUE_3, BLUE_3_DARK, "#64748B"]  # blue + gray dark
 )
 
-pivot_cls = cls_plot_long.pivot(index="Metric", columns="Model", values="Value")
-
-fig, ax = plt.subplots(figsize=(12, 6))
-pivot_cls.plot(kind="bar", ax=ax, color=[BLUE_3_LIGHT, BLUE_3, BLUE_3_DARK], width=0.8)
-
-ax.set_title("Métriques de classification (après regroupement des notes)", pad=18)
-ax.set_xlabel("Métrique")
-ax.set_ylabel("Score (0 à 1)")
-ax.set_ylim(0, 1.05)
+ax.set_title("Accuracy des 4 modèles (tolérance ±1 point)", pad=18)
+ax.set_ylabel("Accuracy (%)")
+ax.set_xlabel("Modèle")
+ax.set_ylim(0, 100)
 ax.set_facecolor("white")
 fig.patch.set_facecolor("white")
 
-# Grid style bleu (comme demandé)
+# Grid style (blue)
 ax.grid(True, axis="y", linestyle="--", linewidth=0.8, color=GRID_BLUE, alpha=1.0)
 ax.set_axisbelow(True)
 
+# Border style
 for spine in ax.spines.values():
     spine.set_visible(True)
     spine.set_linewidth(1.0)
     spine.set_color(BLUE_3_LIGHT)
 
 # Labels on bars
-for container in ax.containers:
-    for bar in container:
-        h = bar.get_height()
-        if pd.notna(h):
-            ax.text(
-                bar.get_x() + bar.get_width()/2,
-                h,
-                f"{h:.3f}",
-                ha="center",
-                va="bottom",
-                fontsize=8
-            )
+for b in bars:
+    h = b.get_height()
+    ax.text(
+        b.get_x() + b.get_width()/2,
+        h + 1,
+        f"{h:.1f}%",
+        ha="center",
+        va="bottom",
+        fontsize=10,
+        color=BLUE_3_DARK
+    )
 
-plt.xticks(rotation=20, ha="right")
-plt.legend(title="Modèle", frameon=True)
+plt.xticks(rotation=15, ha="right")
 plt.tight_layout()
 plt.show()
 
+# ------------------------------------------------------------
+# 6) Plot B — Grouped bars for Accuracy@±0.5 and Accuracy@±1.0 (0 -> 100%)
+# ------------------------------------------------------------
+plot_acc_long = accuracy_4models_df.melt(
+    id_vars=["Modèle"],
+    value_vars=["Accuracy@±0.5 (%)", "Accuracy@±1.0 (%)"],
+    var_name="Métrique",
+    value_name="Accuracy"
+)
 
-# ============================================================
-# 8) (Optionnel) Rapport détaillé par classe pour le meilleur modèle
-# ============================================================
-# Choisit ici le modèle que tu veux inspecter (exemple: small grid)
-print("=== Classification report (Small Grid pondéré) ===")
-print(classification_report(y_test_cls, pred_grid_cls, zero_division=0))
+pivot_acc = plot_acc_long.pivot(index="Modèle", columns="Métrique", values="Accuracy")
+
+fig, ax = plt.subplots(figsize=(12, 6))
+pivot_acc.plot(
+    kind="bar",
+    ax=ax,
+    width=0.8,
+    color=[BLUE_3_LIGHT, BLUE_3_DARK]
+)
+
+ax.set_title("Accuracy des 4 modèles (±0.5 et ±1.0 point)", pad=18)
+ax.set_ylabel("Accuracy (%)")
+ax.set_xlabel("Modèle")
+ax.set_ylim(0, 100)
+ax.set_facecolor("white")
+fig.patch.set_facecolor("white")
+
+# Grid style (blue)
+ax.grid(True, axis="y", linestyle="--", linewidth=0.8, color=GRID_BLUE, alpha=1.0)
+ax.set_axisbelow(True)
+
+# Border style
+for spine in ax.spines.values():
+    spine.set_visible(True)
+    spine.set_linewidth(1.0)
+    spine.set_color(BLUE_3_LIGHT)
+
+# Labels on grouped bars
+for container in ax.containers:
+    for b in container:
+        h = b.get_height()
+        if pd.notna(h):
+            ax.text(
+                b.get_x() + b.get_width()/2,
+                h + 1,
+                f"{h:.1f}%",
+                ha="center",
+                va="bottom",
+                fontsize=9
+            )
+
+plt.xticks(rotation=15, ha="right")
+plt.legend(title="Tolérance", frameon=True)
+plt.tight_layout()
+plt.show()
+
 ```
