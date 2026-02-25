@@ -1,26 +1,31 @@
 ```
+# ============================================================
+# XGBOOST REGRESSION (IMBALANCED TARGET) + RANDOM SEARCH + SMALL GRID SEARCH
+# FULL NOTEBOOK-STYLE CODE (NO FUNCTIONS)
+# ============================================================
+# Assumes you ALREADY have:
+#   - X_train_encoded, X_test_encoded
+#   - y_train, y_test
+#   - X_new_encoded  (your example row already encoded with same training encoding)
+#
+# This code will:
+#   1) Build regression sample weights for imbalanced target (train only)
+#   2) Train a weighted baseline XGBoost model
+#   3) Run Random Search (weighted)
+#   4) Run Small Grid Search around Random Search best params (weighted)
+#   5) Evaluate all models (metrics + regression "accuracy")
+#   6) SHAP global importance (best model)
+#   7) SHAP local explanation for your example row
+#   8) Predict your example row with both tuned models (Random + Grid)
+# ============================================================
 
-Nice — this is the right next step.
 
-Random Search first is exactly the best choice here (much cheaper than full Grid Search), especially with XGBoost + many hyperparameters.
-
-Below is a full no-functions workflow that includes:
-	•	✅ RandomizedSearchCV for XGBoost Regressor
-	•	✅ works with your weighted training (imbalanced regression via sample_weight)
-	•	✅ evaluation metrics (“accuracy” equivalent for regression included)
-	•	✅ SHAP (global + local)
-	•	✅ prediction + SHAP explanation for your exact example row
-
-⸻
-
-1) Imports for Random Search + evaluation + SHAP
-
-# ==============================
-# 1) Imports (Random Search + metrics + SHAP)
-# ==============================
+# ============================================================
+# 1) Imports
+# ============================================================
 from xgboost import XGBRegressor
 
-from sklearn.model_selection import RandomizedSearchCV, KFold
+from sklearn.model_selection import RandomizedSearchCV, GridSearchCV, KFold
 from sklearn.metrics import (
     mean_absolute_error,
     mean_squared_error,
@@ -30,28 +35,25 @@ from sklearn.metrics import (
     explained_variance_score
 )
 
-import shap
 import numpy as np
 import pandas as pd
+import shap
 import matplotlib.pyplot as plt
 
+# Optional display settings for notebooks
+pd.set_option("display.max_columns", 300)
+pd.set_option("display.width", 220)
 
-⸻
 
-2) Final checks before Random Search
+# ============================================================
+# 2) Final checks + numeric safety
+# ============================================================
+print("X_train_encoded shape:", X_train_encoded.shape)
+print("X_test_encoded shape :", X_test_encoded.shape)
+print("y_train shape        :", y_train.shape)
+print("y_test shape         :", y_test.shape)
 
-# ==============================
-# 2) Final checks
-# ==============================
-print("X_train_encoded:", X_train_encoded.shape)
-print("X_test_encoded :", X_test_encoded.shape)
-print("y_train:", y_train.shape)
-print("y_test :", y_test.shape)
-
-print("\nNon-numeric columns in X_train_encoded:")
-print(X_train_encoded.select_dtypes(exclude=[np.number]).columns.tolist())
-
-# Safety: all numeric float
+# Convert features to numeric float
 for c in X_train_encoded.columns:
     X_train_encoded[c] = pd.to_numeric(X_train_encoded[c], errors="coerce")
 for c in X_test_encoded.columns:
@@ -60,129 +62,195 @@ for c in X_test_encoded.columns:
 X_train_encoded = X_train_encoded.astype(float)
 X_test_encoded = X_test_encoded.astype(float)
 
+# Convert target to numeric float
 y_train = pd.to_numeric(y_train, errors="coerce").astype(float)
 y_test = pd.to_numeric(y_test, errors="coerce").astype(float)
 
-print("\nDone final numeric cast ✅")
+# Align / clean X_new_encoded if present
+if "X_new_encoded" in globals():
+    X_new_encoded = X_new_encoded.reindex(columns=X_train_encoded.columns, fill_value=0).copy()
+    for c in X_new_encoded.columns:
+        X_new_encoded[c] = pd.to_numeric(X_new_encoded[c], errors="coerce")
+    X_new_encoded = X_new_encoded.astype(float)
+    print("X_new_encoded shape  :", X_new_encoded.shape)
+
+print("\nAny non-numeric columns left in X_train_encoded?")
+print(X_train_encoded.select_dtypes(exclude=[np.number]).columns.tolist())
+
+print("\nDone ✅")
 
 
-⸻
+# ============================================================
+# 3) Build regression sample weights for imbalanced target (TRAIN ONLY)
+#    Method: inverse frequency on target bins (quantile bins)
+# ============================================================
+# If your target has many repeated values (e.g., many 10s), qcut with duplicates='drop' is important
+n_target_bins_for_weights = 10
 
-3) Regression sample weights for imbalanced target (train only)
+# Bin train target
+y_train_bins = pd.qcut(y_train, q=n_target_bins_for_weights, duplicates="drop")
 
-You asked for imbalanced target handling in regression.
-This is a clean practical approach: give more weight to rare target regions.
+# Frequency counts per bin
+target_bin_counts = y_train_bins.value_counts(dropna=False).sort_index()
 
-Version used here:
-	•	bin y_train into quantiles
-	•	compute inverse-frequency weights
-	•	normalize weights (mean ≈ 1)
+# Inverse frequency map
+target_bin_weight_map = (1.0 / target_bin_counts).to_dict()
 
-# ==============================
-# 3) Sample weights for imbalanced regression target (TRAIN ONLY)
-# ==============================
-# Number of bins (adjust 5-20 depending on size)
-n_bins = 10
+# Row-level weights
+sample_weight_train = y_train_bins.map(target_bin_weight_map).astype(float)
 
-# qcut can fail if too many duplicate target values -> duplicates='drop'
-y_train_bins = pd.qcut(y_train, q=n_bins, duplicates="drop")
-
-# Frequency per bin
-bin_counts = y_train_bins.value_counts(dropna=False)
-
-# Inverse frequency weight per bin
-bin_weight_map = (1.0 / bin_counts).to_dict()
-
-# Map each train row to a weight
-sample_weight_train = y_train_bins.map(bin_weight_map).astype(float)
-
-# Normalize weights so mean weight ~ 1 (more stable training)
+# Normalize weights so average ≈ 1 (stability)
 sample_weight_train = sample_weight_train / sample_weight_train.mean()
 
-print("Sample weights created ✅")
-print("Min weight:", float(sample_weight_train.min()))
-print("Max weight:", float(sample_weight_train.max()))
-print("Mean weight:", float(sample_weight_train.mean()))
+# Optional: clip extreme weights (helps prevent instability/overfitting on rare bins)
+sample_weight_train = np.clip(sample_weight_train, 0.5, 5.0)
+sample_weight_train = sample_weight_train / sample_weight_train.mean()
 
-display(pd.DataFrame({
-    "y_train": y_train.values[:10],
-    "weight": sample_weight_train.values[:10]
-}))
+print("Sample weights ready ✅")
+print("Weight summary:")
+print(pd.Series(sample_weight_train).describe())
+
+print("\nTarget bin distribution (train):")
+display(target_bin_counts)
+
+print("\nAverage weight by target bin:")
+weights_debug_df = pd.DataFrame({
+    "y_train": y_train.values,
+    "y_bin": y_train_bins.astype(str).values,
+    "weight": np.asarray(sample_weight_train, dtype=float)
+})
+display(
+    weights_debug_df.groupby("y_bin")["weight"]
+    .agg(["count", "mean", "min", "max"])
+    .sort_index()
+)
 
 
-⸻
+# ============================================================
+# 4) Common CV setup (used by Random Search and Grid Search)
+# ============================================================
+cv_kfold_weighted = KFold(n_splits=5, shuffle=True, random_state=42)
 
-4) Build base XGBoost model for Random Search
 
-# ==============================
-# 4) Base XGBRegressor for Random Search
-# ==============================
-xgb_rs_base = XGBRegressor(
+# ============================================================
+# 5) Model 1: Weighted Baseline XGBoost (manual params)
+#    (kept for comparison vs Random Search / Grid Search)
+# ============================================================
+model_xgb_weighted_baseline = XGBRegressor(
     objective="reg:squarederror",
     eval_metric="rmse",
-    tree_method="hist",     # fast
+
+    # Baseline params
+    n_estimators=500,
+    learning_rate=0.03,
+    max_depth=6,
+    min_child_weight=3,
+    gamma=0.0,
+
+    subsample=0.8,
+    colsample_bytree=0.8,
+    colsample_bylevel=1.0,
+    colsample_bynode=1.0,
+
+    reg_alpha=0.0,
+    reg_lambda=1.0,
+
+    tree_method="hist",
+    grow_policy="depthwise",
+    max_leaves=0,
+
+    missing=np.nan,
+    n_jobs=-1,
+    random_state=42,
+    verbosity=0
+)
+
+model_xgb_weighted_baseline.fit(
+    X_train_encoded,
+    y_train,
+    sample_weight=np.asarray(sample_weight_train, dtype=float)
+)
+
+print("Model 1 trained: model_xgb_weighted_baseline ✅")
+
+
+# ============================================================
+# 6) Evaluate Model 1 (Weighted Baseline)
+# ============================================================
+pred_train_baseline_w = model_xgb_weighted_baseline.predict(X_train_encoded)
+pred_test_baseline_w = model_xgb_weighted_baseline.predict(X_test_encoded)
+
+# Clip to business range (0..10) if target is score/note
+pred_train_baseline_w_clip = np.clip(pred_train_baseline_w, 0, 10)
+pred_test_baseline_w_clip = np.clip(pred_test_baseline_w, 0, 10)
+
+# Metrics
+mae_train_baseline_w = mean_absolute_error(y_train, pred_train_baseline_w_clip)
+mse_train_baseline_w = mean_squared_error(y_train, pred_train_baseline_w_clip)
+rmse_train_baseline_w = np.sqrt(mse_train_baseline_w)
+r2_train_baseline_w = r2_score(y_train, pred_train_baseline_w_clip)
+medae_train_baseline_w = median_absolute_error(y_train, pred_train_baseline_w_clip)
+maxerr_train_baseline_w = max_error(y_train, pred_train_baseline_w_clip)
+evs_train_baseline_w = explained_variance_score(y_train, pred_train_baseline_w_clip)
+
+mae_test_baseline_w = mean_absolute_error(y_test, pred_test_baseline_w_clip)
+mse_test_baseline_w = mean_squared_error(y_test, pred_test_baseline_w_clip)
+rmse_test_baseline_w = np.sqrt(mse_test_baseline_w)
+r2_test_baseline_w = r2_score(y_test, pred_test_baseline_w_clip)
+medae_test_baseline_w = median_absolute_error(y_test, pred_test_baseline_w_clip)
+maxerr_test_baseline_w = max_error(y_test, pred_test_baseline_w_clip)
+evs_test_baseline_w = explained_variance_score(y_test, pred_test_baseline_w_clip)
+
+# Regression "accuracy" (tolerance-based)
+acc05_train_baseline_w = (np.abs(y_train - pred_train_baseline_w_clip) <= 0.5).mean() * 100
+acc10_train_baseline_w = (np.abs(y_train - pred_train_baseline_w_clip) <= 1.0).mean() * 100
+acc05_test_baseline_w = (np.abs(y_test - pred_test_baseline_w_clip) <= 0.5).mean() * 100
+acc10_test_baseline_w = (np.abs(y_test - pred_test_baseline_w_clip) <= 1.0).mean() * 100
+
+eps = 1e-8
+mape_test_baseline_w = np.mean(np.abs((y_test - pred_test_baseline_w_clip) / np.maximum(np.abs(y_test), eps))) * 100
+smape_test_baseline_w = np.mean(
+    2.0 * np.abs(pred_test_baseline_w_clip - y_test) / np.maximum(np.abs(y_test) + np.abs(pred_test_baseline_w_clip), eps)
+) * 100
+
+
+# ============================================================
+# 7) Model 2: Random Search (weighted)
+# ============================================================
+# Base estimator for random search
+xgb_random_base_weighted = XGBRegressor(
+    objective="reg:squarederror",
+    eval_metric="rmse",
+    tree_method="hist",
     random_state=42,
     n_jobs=-1,
     verbosity=0,
     missing=np.nan
 )
 
-
-⸻
-
-5) Random Search parameter space (focused, not too huge)
-
-This is the important part.
-We keep a focused search space so compute stays reasonable.
-
-# ==============================
-# 5) Random Search parameter distributions (focused)
-# ==============================
-param_distributions = {
-    # Core complexity / learning
+# Focused parameter space (good first search, not too huge)
+param_distributions_random_weighted = {
     "n_estimators": [200, 300, 500, 700, 900],
     "learning_rate": [0.01, 0.02, 0.03, 0.05, 0.08, 0.1],
     "max_depth": [3, 4, 5, 6, 7, 8],
     "min_child_weight": [1, 2, 3, 5, 7, 10],
-
-    # Split control
     "gamma": [0.0, 0.1, 0.3, 0.5, 1.0],
-
-    # Sampling (helps generalization)
     "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
     "colsample_bytree": [0.6, 0.7, 0.8, 0.9, 1.0],
     "colsample_bylevel": [0.8, 1.0],
     "colsample_bynode": [0.8, 1.0],
-
-    # Regularization
     "reg_alpha": [0.0, 0.001, 0.01, 0.1, 1.0],
     "reg_lambda": [0.5, 1.0, 2.0, 5.0],
-
-    # Tree growth mode
     "grow_policy": ["depthwise", "lossguide"],
-    "max_leaves": [0, 31, 63, 127]  # used mainly when lossguide
+    "max_leaves": [0, 31, 63, 127]
 }
 
-
-⸻
-
-6) Cross-validation setup + RandomizedSearchCV (weighted)
-
-Why neg_root_mean_squared_error?
-
-Good default for regression, same spirit as your eval metric RMSE.
-
-# ==============================
-# 6) Randomized Search CV (weighted training)
-# ==============================
-cv = KFold(n_splits=5, shuffle=True, random_state=42)
-
 random_search_xgb_weighted = RandomizedSearchCV(
-    estimator=xgb_rs_base,
-    param_distributions=param_distributions,
-    n_iter=30,                    # start 20-40; increase later if needed
+    estimator=xgb_random_base_weighted,
+    param_distributions=param_distributions_random_weighted,
+    n_iter=30,   # adjust 20-50 depending on compute budget
     scoring="neg_root_mean_squared_error",
-    cv=cv,
+    cv=cv_kfold_weighted,
     verbose=2,
     random_state=42,
     n_jobs=-1,
@@ -190,104 +258,242 @@ random_search_xgb_weighted = RandomizedSearchCV(
     return_train_score=True
 )
 
-# IMPORTANT: pass sample_weight into fit()
 random_search_xgb_weighted.fit(
     X_train_encoded,
     y_train,
-    sample_weight=sample_weight_train.values
+    sample_weight=np.asarray(sample_weight_train, dtype=float)
 )
 
-print("Random Search completed ✅")
-print("Best CV score (neg RMSE):", random_search_xgb_weighted.best_score_)
-print("Best CV RMSE:", -random_search_xgb_weighted.best_score_)
-print("\nBest params:")
+model_xgb_weighted_randomsearch = random_search_xgb_weighted.best_estimator_
+
+print("\nModel 2 trained: model_xgb_weighted_randomsearch ✅")
+print("Best Random Search CV RMSE:", -random_search_xgb_weighted.best_score_)
+print("Best Random Search Params:")
 print(random_search_xgb_weighted.best_params_)
 
 
-⸻
+# ============================================================
+# 8) Evaluate Model 2 (Random Search weighted)
+# ============================================================
+pred_train_random_w = model_xgb_weighted_randomsearch.predict(X_train_encoded)
+pred_test_random_w = model_xgb_weighted_randomsearch.predict(X_test_encoded)
 
-7) Best model from Random Search + train/test predictions
+pred_train_random_w_clip = np.clip(pred_train_random_w, 0, 10)
+pred_test_random_w_clip = np.clip(pred_test_random_w, 0, 10)
 
-# ==============================
-# 7) Get best model + predictions
-# ==============================
-best_xgb_random_weighted = random_search_xgb_weighted.best_estimator_
+mae_train_random_w = mean_absolute_error(y_train, pred_train_random_w_clip)
+mse_train_random_w = mean_squared_error(y_train, pred_train_random_w_clip)
+rmse_train_random_w = np.sqrt(mse_train_random_w)
+r2_train_random_w = r2_score(y_train, pred_train_random_w_clip)
+medae_train_random_w = median_absolute_error(y_train, pred_train_random_w_clip)
+maxerr_train_random_w = max_error(y_train, pred_train_random_w_clip)
+evs_train_random_w = explained_variance_score(y_train, pred_train_random_w_clip)
 
-pred_train_rs_w = best_xgb_random_weighted.predict(X_train_encoded)
-pred_test_rs_w = best_xgb_random_weighted.predict(X_test_encoded)
+mae_test_random_w = mean_absolute_error(y_test, pred_test_random_w_clip)
+mse_test_random_w = mean_squared_error(y_test, pred_test_random_w_clip)
+rmse_test_random_w = np.sqrt(mse_test_random_w)
+r2_test_random_w = r2_score(y_test, pred_test_random_w_clip)
+medae_test_random_w = median_absolute_error(y_test, pred_test_random_w_clip)
+maxerr_test_random_w = max_error(y_test, pred_test_random_w_clip)
+evs_test_random_w = explained_variance_score(y_test, pred_test_random_w_clip)
 
-# Clip to business range (0..10) if your target is a note / score
-pred_train_rs_w_clipped = np.clip(pred_train_rs_w, 0, 10)
-pred_test_rs_w_clipped = np.clip(pred_test_rs_w, 0, 10)
+acc05_train_random_w = (np.abs(y_train - pred_train_random_w_clip) <= 0.5).mean() * 100
+acc10_train_random_w = (np.abs(y_train - pred_train_random_w_clip) <= 1.0).mean() * 100
+acc05_test_random_w = (np.abs(y_test - pred_test_random_w_clip) <= 0.5).mean() * 100
+acc10_test_random_w = (np.abs(y_test - pred_test_random_w_clip) <= 1.0).mean() * 100
 
-print("Predictions done ✅")
-print("Train sample predictions:", pred_train_rs_w_clipped[:10])
-print("Test sample predictions :", pred_test_rs_w_clipped[:10])
-
-
-⸻
-
-8) “Accuracy” for regression + full evaluation metrics
-
-In regression, there is no classic classification accuracy.
-So we add practical regression accuracy-style metrics:
-	•	R² (main “accuracy-like” metric for regression)
-	•	Accuracy within tolerance (e.g. ±0.5, ±1.0 note points)
-	•	plus MAE/RMSE/etc.
-
-# ==============================
-# 8) Evaluation metrics + regression "accuracy"
-# ==============================
-
-# --- Train metrics
-mae_train_rs_w = mean_absolute_error(y_train, pred_train_rs_w_clipped)
-mse_train_rs_w = mean_squared_error(y_train, pred_train_rs_w_clipped)
-rmse_train_rs_w = np.sqrt(mse_train_rs_w)
-r2_train_rs_w = r2_score(y_train, pred_train_rs_w_clipped)
-medae_train_rs_w = median_absolute_error(y_train, pred_train_rs_w_clipped)
-maxerr_train_rs_w = max_error(y_train, pred_train_rs_w_clipped)
-evs_train_rs_w = explained_variance_score(y_train, pred_train_rs_w_clipped)
-
-# --- Test metrics
-mae_test_rs_w = mean_absolute_error(y_test, pred_test_rs_w_clipped)
-mse_test_rs_w = mean_squared_error(y_test, pred_test_rs_w_clipped)
-rmse_test_rs_w = np.sqrt(mse_test_rs_w)
-r2_test_rs_w = r2_score(y_test, pred_test_rs_w_clipped)
-medae_test_rs_w = median_absolute_error(y_test, pred_test_rs_w_clipped)
-maxerr_test_rs_w = max_error(y_test, pred_test_rs_w_clipped)
-evs_test_rs_w = explained_variance_score(y_test, pred_test_rs_w_clipped)
-
-# --- Regression "accuracy" by tolerance (very useful for note prediction 0..10)
-tol_05_train = np.mean(np.abs(y_train - pred_train_rs_w_clipped) <= 0.5) * 100
-tol_10_train = np.mean(np.abs(y_train - pred_train_rs_w_clipped) <= 1.0) * 100
-
-tol_05_test = np.mean(np.abs(y_test - pred_test_rs_w_clipped) <= 0.5) * 100
-tol_10_test = np.mean(np.abs(y_test - pred_test_rs_w_clipped) <= 1.0) * 100
-
-# Optional percentage metrics
-eps = 1e-8
-mape_test_rs_w = np.mean(np.abs((y_test - pred_test_rs_w_clipped) / np.maximum(np.abs(y_test), eps))) * 100
-smape_test_rs_w = np.mean(
-    2.0 * np.abs(pred_test_rs_w_clipped - y_test) / np.maximum(np.abs(y_test) + np.abs(pred_test_rs_w_clipped), eps)
+mape_test_random_w = np.mean(np.abs((y_test - pred_test_random_w_clip) / np.maximum(np.abs(y_test), eps))) * 100
+smape_test_random_w = np.mean(
+    2.0 * np.abs(pred_test_random_w_clip - y_test) / np.maximum(np.abs(y_test) + np.abs(pred_test_random_w_clip), eps)
 ) * 100
 
-Print metrics clearly
 
-# ==============================
-# 9) Print metrics table (Random Search weighted)
-# ==============================
-random_search_weighted_metrics = pd.DataFrame({
+# ============================================================
+# 9) Inspect Random Search CV results (top trials)
+# ============================================================
+cv_results_random_weighted_df = (
+    pd.DataFrame(random_search_xgb_weighted.cv_results_)
+    .sort_values("rank_test_score")
+    .reset_index(drop=True)
+)
+
+cols_show_random = [
+    "rank_test_score", "mean_test_score", "std_test_score", "mean_train_score",
+    "param_n_estimators", "param_learning_rate", "param_max_depth", "param_min_child_weight",
+    "param_gamma", "param_subsample", "param_colsample_bytree",
+    "param_reg_alpha", "param_reg_lambda", "param_grow_policy", "param_max_leaves"
+]
+print("\nTop Random Search trials:")
+display(cv_results_random_weighted_df[[c for c in cols_show_random if c in cv_results_random_weighted_df.columns]].head(10))
+
+
+# ============================================================
+# 10) Model 3: Small Grid Search (weighted) around Random Search best params
+# ============================================================
+best_rs_params = random_search_xgb_weighted.best_params_.copy()
+
+# Small focused grid around best params (cheap refinement)
+# We tune only the most impactful params (keep others fixed)
+base_lr = float(best_rs_params.get("learning_rate", 0.05))
+base_depth = int(best_rs_params.get("max_depth", 6))
+base_min_child = int(best_rs_params.get("min_child_weight", 3))
+base_subsample = float(best_rs_params.get("subsample", 0.8))
+base_colsample = float(best_rs_params.get("colsample_bytree", 0.8))
+base_n_estimators = int(best_rs_params.get("n_estimators", 500))
+base_gamma = float(best_rs_params.get("gamma", 0.0))
+base_reg_alpha = float(best_rs_params.get("reg_alpha", 0.0))
+base_reg_lambda = float(best_rs_params.get("reg_lambda", 1.0))
+base_grow_policy = best_rs_params.get("grow_policy", "depthwise")
+base_max_leaves = int(best_rs_params.get("max_leaves", 0))
+base_colsample_bylevel = float(best_rs_params.get("colsample_bylevel", 1.0))
+base_colsample_bynode = float(best_rs_params.get("colsample_bynode", 1.0))
+
+# Helper values (manual inline, no function)
+lr_grid = sorted(set([
+    round(max(0.005, base_lr * 0.7), 4),
+    round(base_lr, 4),
+    round(min(0.3, base_lr * 1.3), 4)
+]))
+
+depth_grid = sorted(set([
+    max(2, base_depth - 1),
+    base_depth,
+    min(12, base_depth + 1)
+]))
+
+min_child_grid = sorted(set([
+    max(1, base_min_child - 2),
+    base_min_child,
+    base_min_child + 2
+]))
+
+subsample_grid = sorted(set([
+    round(max(0.5, base_subsample - 0.1), 2),
+    round(base_subsample, 2),
+    round(min(1.0, base_subsample + 0.1), 2)
+]))
+
+colsample_grid = sorted(set([
+    round(max(0.5, base_colsample - 0.1), 2),
+    round(base_colsample, 2),
+    round(min(1.0, base_colsample + 0.1), 2)
+]))
+
+# Keep grid small to avoid huge compute
+param_grid_small_weighted = {
+    "n_estimators": [base_n_estimators],  # keep fixed to reduce compute
+    "learning_rate": lr_grid,
+    "max_depth": depth_grid,
+    "min_child_weight": min_child_grid,
+    "subsample": subsample_grid,
+    "colsample_bytree": colsample_grid,
+
+    # Fixed from random search best
+    "gamma": [base_gamma],
+    "reg_alpha": [base_reg_alpha],
+    "reg_lambda": [base_reg_lambda],
+    "grow_policy": [base_grow_policy],
+    "max_leaves": [base_max_leaves],
+    "colsample_bylevel": [base_colsample_bylevel],
+    "colsample_bynode": [base_colsample_bynode]
+}
+
+print("\nSmall Grid (weighted) around Random Search best:")
+print(param_grid_small_weighted)
+
+xgb_grid_base_weighted = XGBRegressor(
+    objective="reg:squarederror",
+    eval_metric="rmse",
+    tree_method="hist",
+    random_state=42,
+    n_jobs=-1,
+    verbosity=0,
+    missing=np.nan
+)
+
+grid_search_xgb_weighted_small = GridSearchCV(
+    estimator=xgb_grid_base_weighted,
+    param_grid=param_grid_small_weighted,
+    scoring="neg_root_mean_squared_error",
+    cv=cv_kfold_weighted,
+    verbose=2,
+    n_jobs=-1,
+    refit=True,
+    return_train_score=True
+)
+
+grid_search_xgb_weighted_small.fit(
+    X_train_encoded,
+    y_train,
+    sample_weight=np.asarray(sample_weight_train, dtype=float)
+)
+
+model_xgb_weighted_gridsearch_small = grid_search_xgb_weighted_small.best_estimator_
+
+print("\nModel 3 trained: model_xgb_weighted_gridsearch_small ✅")
+print("Best Small Grid Search CV RMSE:", -grid_search_xgb_weighted_small.best_score_)
+print("Best Small Grid Search Params:")
+print(grid_search_xgb_weighted_small.best_params_)
+
+
+# ============================================================
+# 11) Evaluate Model 3 (Small Grid Search weighted)
+# ============================================================
+pred_train_grid_w = model_xgb_weighted_gridsearch_small.predict(X_train_encoded)
+pred_test_grid_w = model_xgb_weighted_gridsearch_small.predict(X_test_encoded)
+
+pred_train_grid_w_clip = np.clip(pred_train_grid_w, 0, 10)
+pred_test_grid_w_clip = np.clip(pred_test_grid_w, 0, 10)
+
+mae_train_grid_w = mean_absolute_error(y_train, pred_train_grid_w_clip)
+mse_train_grid_w = mean_squared_error(y_train, pred_train_grid_w_clip)
+rmse_train_grid_w = np.sqrt(mse_train_grid_w)
+r2_train_grid_w = r2_score(y_train, pred_train_grid_w_clip)
+medae_train_grid_w = median_absolute_error(y_train, pred_train_grid_w_clip)
+maxerr_train_grid_w = max_error(y_train, pred_train_grid_w_clip)
+evs_train_grid_w = explained_variance_score(y_train, pred_train_grid_w_clip)
+
+mae_test_grid_w = mean_absolute_error(y_test, pred_test_grid_w_clip)
+mse_test_grid_w = mean_squared_error(y_test, pred_test_grid_w_clip)
+rmse_test_grid_w = np.sqrt(mse_test_grid_w)
+r2_test_grid_w = r2_score(y_test, pred_test_grid_w_clip)
+medae_test_grid_w = median_absolute_error(y_test, pred_test_grid_w_clip)
+maxerr_test_grid_w = max_error(y_test, pred_test_grid_w_clip)
+evs_test_grid_w = explained_variance_score(y_test, pred_test_grid_w_clip)
+
+acc05_train_grid_w = (np.abs(y_train - pred_train_grid_w_clip) <= 0.5).mean() * 100
+acc10_train_grid_w = (np.abs(y_train - pred_train_grid_w_clip) <= 1.0).mean() * 100
+acc05_test_grid_w = (np.abs(y_test - pred_test_grid_w_clip) <= 0.5).mean() * 100
+acc10_test_grid_w = (np.abs(y_test - pred_test_grid_w_clip) <= 1.0).mean() * 100
+
+mape_test_grid_w = np.mean(np.abs((y_test - pred_test_grid_w_clip) / np.maximum(np.abs(y_test), eps))) * 100
+smape_test_grid_w = np.mean(
+    2.0 * np.abs(pred_test_grid_w_clip - y_test) / np.maximum(np.abs(y_test) + np.abs(pred_test_grid_w_clip), eps)
+) * 100
+
+
+# ============================================================
+# 12) Metrics tables for all three models
+# ============================================================
+metrics_all_models_test = pd.DataFrame({
     "Metric": [
         "MAE", "MSE", "RMSE", "R2", "MedianAE", "MaxError", "ExplainedVariance",
         "Accuracy@±0.5 (%)", "Accuracy@±1.0 (%)", "MAPE_%", "sMAPE_%"
     ],
-    "Train": [
-        mae_train_rs_w, mse_train_rs_w, rmse_train_rs_w, r2_train_rs_w, medae_train_rs_w, maxerr_train_rs_w, evs_train_rs_w,
-        tol_05_train, tol_10_train, np.nan, np.nan
+    "Model1_BaselineWeighted_Test": [
+        mae_test_baseline_w, mse_test_baseline_w, rmse_test_baseline_w, r2_test_baseline_w,
+        medae_test_baseline_w, maxerr_test_baseline_w, evs_test_baseline_w,
+        acc05_test_baseline_w, acc10_test_baseline_w, mape_test_baseline_w, smape_test_baseline_w
     ],
-    "Test": [
-        mae_test_rs_w, mse_test_rs_w, rmse_test_rs_w, r2_test_rs_w, medae_test_rs_w, maxerr_test_rs_w, evs_test_rs_w,
-        tol_05_test, tol_10_test, mape_test_rs_w, smape_test_rs_w
+    "Model2_RandomSearchWeighted_Test": [
+        mae_test_random_w, mse_test_random_w, rmse_test_random_w, r2_test_random_w,
+        medae_test_random_w, maxerr_test_random_w, evs_test_random_w,
+        acc05_test_random_w, acc10_test_random_w, mape_test_random_w, smape_test_random_w
+    ],
+    "Model3_SmallGridWeighted_Test": [
+        mae_test_grid_w, mse_test_grid_w, rmse_test_grid_w, r2_test_grid_w,
+        medae_test_grid_w, maxerr_test_grid_w, evs_test_grid_w,
+        acc05_test_grid_w, acc10_test_grid_w, mape_test_grid_w, smape_test_grid_w
     ],
     "Better if": [
         "Lower", "Lower", "Lower", "Higher", "Lower", "Lower", "Higher",
@@ -295,279 +501,299 @@ random_search_weighted_metrics = pd.DataFrame({
     ]
 })
 
-print("\n=== Random Search Weighted XGBoost Results ===")
-display(random_search_weighted_metrics)
+print("\n=== TEST Metrics Comparison (All Models) ===")
+display(metrics_all_models_test)
 
-
-⸻
-
-9.1) Which hyperparameters mattered most in Random Search (from CV results)
-
-This is not perfect causal importance, but very useful.
-
-# ==============================
-# 9.1) Random Search results inspection (top trials)
-# ==============================
-cv_results_df = pd.DataFrame(random_search_xgb_weighted.cv_results_).sort_values(
-    "rank_test_score"
-).reset_index(drop=True)
-
-cols_to_show = [
-    "rank_test_score",
-    "mean_test_score",
-    "std_test_score",
-    "mean_train_score",
-    "param_n_estimators",
-    "param_learning_rate",
-    "param_max_depth",
-    "param_min_child_weight",
-    "param_gamma",
-    "param_subsample",
-    "param_colsample_bytree",
-    "param_reg_alpha",
-    "param_reg_lambda",
-    "param_grow_policy",
-    "param_max_leaves"
-]
-
-print("Top 10 Random Search trials:")
-display(cv_results_df[cols_to_show].head(10))
-
-
-⸻
-
-10) SHAP global feature importance (best random-search weighted model)
-
-# ==============================
-# 10) SHAP - Global feature importance (best random-search weighted model)
-# ==============================
-# Sample for speed
-shap_sample_size = min(1000, len(X_train_encoded))
-X_shap_sample_rs_w = X_train_encoded.sample(shap_sample_size, random_state=42).copy()
-
-# Ensure safe feature names
-X_shap_sample_rs_w.columns = X_shap_sample_rs_w.columns.astype(str)
-
-# Explainer
-explainer_rs_w = shap.TreeExplainer(best_xgb_random_weighted)
-
-# SHAP values
-shap_values_rs_w = explainer_rs_w.shap_values(X_shap_sample_rs_w)
-
-print("SHAP sample shape:", X_shap_sample_rs_w.shape)
-print("SHAP values shape:", np.array(shap_values_rs_w).shape)
-
-SHAP summary plots
-
-# ==============================
-# 11) SHAP summary plots (global)
-# ==============================
-plt.figure()
-shap.summary_plot(shap_values_rs_w, X_shap_sample_rs_w, show=False)
-plt.tight_layout()
-plt.show()
-
-plt.figure()
-shap.summary_plot(shap_values_rs_w, X_shap_sample_rs_w, plot_type="bar", show=False)
-plt.tight_layout()
-plt.show()
-
-SHAP importance dataframe
-
-# ==============================
-# 12) Global SHAP importance dataframe
-# ==============================
-mean_abs_shap_rs_w = np.abs(shap_values_rs_w).mean(axis=0)
-
-shap_importance_random_weighted_df = pd.DataFrame({
-    "feature": X_shap_sample_rs_w.columns.astype(str),
-    "mean_abs_shap": mean_abs_shap_rs_w
-}).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
-
-print("Top 20 global SHAP features (best random-search weighted model):")
-display(shap_importance_random_weighted_df.head(20))
-
-
-⸻
-
-11) Predict your exact example row (same row you gave before)
-
-You asked to include your example again.
-This block assumes you already created and encoded it before into:
-	•	X_new_encoded
-
-If not, use the encoding block we built earlier first, then run this.
-
-# ==============================
-# 13) Predict your example row using best random-search weighted model
-# ==============================
-print("X_new_encoded.shape:", X_new_encoded.shape)
-print("Expected columns:", X_train_encoded.shape[1])
-
-# Safety: align columns exactly (in case anything changed)
-X_new_encoded = X_new_encoded.reindex(columns=X_train_encoded.columns, fill_value=0).copy()
-
-for c in X_new_encoded.columns:
-    X_new_encoded[c] = pd.to_numeric(X_new_encoded[c], errors="coerce")
-X_new_encoded = X_new_encoded.astype(float)
-
-pred_new_rs_w = best_xgb_random_weighted.predict(X_new_encoded)
-pred_new_rs_w_clipped = np.clip(pred_new_rs_w, 0, 10)
-
-print("Random Search Weighted prediction (raw):", float(pred_new_rs_w[0]))
-print("Random Search Weighted prediction (clipped 0..10):", float(pred_new_rs_w_clipped[0]))
-
-
-⸻
-
-12) SHAP explanation for your example row (why this prediction)
-
-# ==============================
-# 14) SHAP for your example row (local explanation)
-# ==============================
-# SHAP values for the single row
-shap_values_new_rs_w = explainer_rs_w.shap_values(X_new_encoded)
-
-# Expected/base value
-base_value_rs_w = explainer_rs_w.expected_value
-if isinstance(base_value_rs_w, (list, np.ndarray)):
-    base_value_rs_w = np.array(base_value_rs_w).reshape(-1)[0]
-
-row_shap_values_rs_w = np.array(shap_values_new_rs_w)[0]
-row_values_rs_w = X_new_encoded.iloc[0]
-
-# Contribution dataframe
-shap_row_random_weighted_df = pd.DataFrame({
-    "feature": X_new_encoded.columns.astype(str),
-    "feature_value": row_values_rs_w.values,
-    "shap_value": row_shap_values_rs_w,
-    "abs_shap_value": np.abs(row_shap_values_rs_w)
-}).sort_values("abs_shap_value", ascending=False).reset_index(drop=True)
-
-shap_row_random_weighted_df["effect_on_prediction"] = np.where(
-    shap_row_random_weighted_df["shap_value"] > 0, "pushes UP",
-    np.where(shap_row_random_weighted_df["shap_value"] < 0, "pushes DOWN", "neutral")
-)
-
-print("Top features that influenced THIS example prediction:")
-display(shap_row_random_weighted_df.head(25))
-
-# Sanity check
-reconstructed_pred_rs_w = float(base_value_rs_w + row_shap_values_rs_w.sum())
-
-print("Base value (expected):", float(base_value_rs_w))
-print("Sum SHAP values      :", float(row_shap_values_rs_w.sum()))
-print("Reconstructed pred   :", reconstructed_pred_rs_w)
-print("Model raw prediction :", float(pred_new_rs_w[0]))
-print("Difference           :", abs(reconstructed_pred_rs_w - float(pred_new_rs_w[0])))
-
-Waterfall plot for your example row
-
-# ==============================
-# 15) SHAP waterfall plot for your example row
-# ==============================
-shap_exp_new_rs_w = shap.Explanation(
-    values=row_shap_values_rs_w,
-    base_values=base_value_rs_w,
-    data=X_new_encoded.iloc[0].values,
-    feature_names=X_new_encoded.columns.tolist()
-)
-
-plt.figure()
-shap.plots.waterfall(shap_exp_new_rs_w, max_display=20, show=False)
-plt.tight_layout()
-plt.show()
-
-
-⸻
-
-13) Optional: compare baseline / weighted / random-search-weighted on the same example
-
-# ==============================
-# 16) Compare models on the same example row (optional)
-# ==============================
-comparison_pred = []
-
-if "baseline_xgb_model" in globals():
-    p = baseline_xgb_model.predict(X_new_encoded)
-    comparison_pred.append({
-        "model": "Baseline XGB",
-        "prediction_raw": float(p[0]),
-        "prediction_clipped_0_10": float(np.clip(p[0], 0, 10))
-    })
-
-if "xgb_reg_weighted" in globals():
-    p = xgb_reg_weighted.predict(X_new_encoded)
-    comparison_pred.append({
-        "model": "Weighted XGB (manual params)",
-        "prediction_raw": float(p[0]),
-        "prediction_clipped_0_10": float(np.clip(p[0], 0, 10))
-    })
-
-p = best_xgb_random_weighted.predict(X_new_encoded)
-comparison_pred.append({
-    "model": "Best RandomSearch Weighted XGB",
-    "prediction_raw": float(p[0]),
-    "prediction_clipped_0_10": float(np.clip(p[0], 0, 10))
+metrics_all_models_train = pd.DataFrame({
+    "Metric": [
+        "MAE", "MSE", "RMSE", "R2", "MedianAE", "MaxError", "ExplainedVariance",
+        "Accuracy@±0.5 (%)", "Accuracy@±1.0 (%)"
+    ],
+    "Model1_BaselineWeighted_Train": [
+        mae_train_baseline_w, mse_train_baseline_w, rmse_train_baseline_w, r2_train_baseline_w,
+        medae_train_baseline_w, maxerr_train_baseline_w, evs_train_baseline_w,
+        acc05_train_baseline_w, acc10_train_baseline_w
+    ],
+    "Model2_RandomSearchWeighted_Train": [
+        mae_train_random_w, mse_train_random_w, rmse_train_random_w, r2_train_random_w,
+        medae_train_random_w, maxerr_train_random_w, evs_train_random_w,
+        acc05_train_random_w, acc10_train_random_w
+    ],
+    "Model3_SmallGridWeighted_Train": [
+        mae_train_grid_w, mse_train_grid_w, rmse_train_grid_w, r2_train_grid_w,
+        medae_train_grid_w, maxerr_train_grid_w, evs_train_grid_w,
+        acc05_train_grid_w, acc10_train_grid_w
+    ]
 })
 
-comparison_pred_df = pd.DataFrame(comparison_pred)
-display(comparison_pred_df)
+print("\n=== TRAIN Metrics Comparison (All Models) ===")
+display(metrics_all_models_train)
 
 
-⸻
+# ============================================================
+# 13) Choose best model for SHAP (by Test RMSE here)
+#    You can change criterion to R2 or MAE if preferred
+# ============================================================
+model_rmse_test_map = {
+    "Model1_BaselineWeighted": rmse_test_baseline_w,
+    "Model2_RandomSearchWeighted": rmse_test_random_w,
+    "Model3_SmallGridWeighted": rmse_test_grid_w
+}
 
-14) Save outputs (useful for next step)
+best_model_name_for_shap = min(model_rmse_test_map, key=model_rmse_test_map.get)
 
-# ==============================
-# 17) Save important outputs
-# ==============================
-best_random_search_weighted_model = best_xgb_random_weighted
-best_random_search_weighted_params = random_search_xgb_weighted.best_params_
-best_random_search_weighted_cv_results = cv_results_df.copy()
+if best_model_name_for_shap == "Model1_BaselineWeighted":
+    model_best_for_shap = model_xgb_weighted_baseline
+elif best_model_name_for_shap == "Model2_RandomSearchWeighted":
+    model_best_for_shap = model_xgb_weighted_randomsearch
+else:
+    model_best_for_shap = model_xgb_weighted_gridsearch_small
 
-pred_test_best_random_weighted = pred_test_rs_w_clipped.copy()
-metrics_best_random_weighted = random_search_weighted_metrics.copy()
-shap_global_best_random_weighted = shap_importance_random_weighted_df.copy()
-shap_local_example_best_random_weighted = shap_row_random_weighted_df.copy()
-
-print("Saved ✅")
-print("- best_random_search_weighted_model")
-print("- best_random_search_weighted_params")
-print("- best_random_search_weighted_cv_results")
-print("- pred_test_best_random_weighted")
-print("- metrics_best_random_weighted")
-print("- shap_global_best_random_weighted")
-print("- shap_local_example_best_random_weighted")
+print("\nBest model selected for SHAP (by lowest Test RMSE):", best_model_name_for_shap)
+print("RMSE:", model_rmse_test_map[best_model_name_for_shap])
 
 
-⸻
+# ============================================================
+# 14) SHAP Global Feature Importance (best model)
+# ============================================================
+# Sample for speed (increase if needed)
+shap_sample_size = min(1000, len(X_train_encoded))
+X_shap_sample_best = X_train_encoded.sample(shap_sample_size, random_state=42).copy()
+X_shap_sample_best.columns = X_shap_sample_best.columns.astype(str)
 
-Quick notes (important)
-	•	For regression, “accuracy” is not the same as classification.
-Use:
-	•	R²
-	•	Accuracy@±0.5
-	•	Accuracy@±1.0
-	•	Random Search is much better than Grid Search at this stage because:
-	•	too many hyperparameters
-	•	XGBoost training is expensive
-	•	you get strong results with less compute
+explainer_best = shap.TreeExplainer(model_best_for_shap)
+shap_values_best = explainer_best.shap_values(X_shap_sample_best)
 
-⸻
+print("SHAP sample shape:", X_shap_sample_best.shape)
+print("SHAP values shape:", np.array(shap_values_best).shape)
 
-If you want next (recommended)
+# Summary plot (beeswarm)
+plt.figure()
+shap.summary_plot(shap_values_best, X_shap_sample_best, show=False)
+plt.tight_layout()
+plt.show()
 
-I can write the next block for:
+# Summary bar plot
+plt.figure()
+shap.summary_plot(shap_values_best, X_shap_sample_best, plot_type="bar", show=False)
+plt.tight_layout()
+plt.show()
 
-Small Focused Grid Search (after Random Search)
+# SHAP importance table
+shap_global_importance_best_df = pd.DataFrame({
+    "feature": X_shap_sample_best.columns.astype(str),
+    "mean_abs_shap": np.abs(shap_values_best).mean(axis=0)
+}).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
 
-Only around the best params, e.g. tune just:
-	•	max_depth
-	•	min_child_weight
-	•	learning_rate
-	•	subsample
-	•	colsample_bytree
+print("\nTop 30 Global SHAP features (best model):")
+display(shap_global_importance_best_df.head(30))
 
-That gives you a cheap refinement step after Random Search.
+
+# ============================================================
+# 15) Predict YOUR EXAMPLE ROW with BOTH tuned models (Random + Grid)
+# ============================================================
+if "X_new_encoded" in globals():
+    # Safety align again
+    X_new_encoded = X_new_encoded.reindex(columns=X_train_encoded.columns, fill_value=0).copy()
+    for c in X_new_encoded.columns:
+        X_new_encoded[c] = pd.to_numeric(X_new_encoded[c], errors="coerce")
+    X_new_encoded = X_new_encoded.astype(float)
+
+    pred_new_random_w = model_xgb_weighted_randomsearch.predict(X_new_encoded)
+    pred_new_grid_w = model_xgb_weighted_gridsearch_small.predict(X_new_encoded)
+
+    pred_new_random_w_clip = np.clip(pred_new_random_w, 0, 10)
+    pred_new_grid_w_clip = np.clip(pred_new_grid_w, 0, 10)
+
+    # Optional also baseline
+    pred_new_baseline_w = model_xgb_weighted_baseline.predict(X_new_encoded)
+    pred_new_baseline_w_clip = np.clip(pred_new_baseline_w, 0, 10)
+
+    predictions_example_compare_df = pd.DataFrame({
+        "Model": [
+            "Model1_BaselineWeighted",
+            "Model2_RandomSearchWeighted",
+            "Model3_SmallGridWeighted"
+        ],
+        "Prediction_Raw": [
+            float(pred_new_baseline_w[0]),
+            float(pred_new_random_w[0]),
+            float(pred_new_grid_w[0])
+        ],
+        "Prediction_Clipped_0_10": [
+            float(pred_new_baseline_w_clip[0]),
+            float(pred_new_random_w_clip[0]),
+            float(pred_new_grid_w_clip[0])
+        ]
+    })
+
+    print("\n=== Prediction on your example row (all models) ===")
+    display(predictions_example_compare_df)
+else:
+    print("\nX_new_encoded not found. Skipping example row prediction blocks.")
+
+
+# ============================================================
+# 16) SHAP Local Explanation for YOUR EXAMPLE ROW (best model)
+# ============================================================
+if "X_new_encoded" in globals():
+    shap_values_new_best = explainer_best.shap_values(X_new_encoded)
+
+    base_value_best = explainer_best.expected_value
+    if isinstance(base_value_best, (list, np.ndarray)):
+        base_value_best = float(np.array(base_value_best).reshape(-1)[0])
+    else:
+        base_value_best = float(base_value_best)
+
+    row_shap_values_best = np.array(shap_values_new_best)[0]
+    row_values_best = X_new_encoded.iloc[0]
+
+    shap_local_example_best_df = pd.DataFrame({
+        "feature": X_new_encoded.columns.astype(str),
+        "feature_value": row_values_best.values,
+        "shap_value": row_shap_values_best,
+        "abs_shap_value": np.abs(row_shap_values_best)
+    }).sort_values("abs_shap_value", ascending=False).reset_index(drop=True)
+
+    shap_local_example_best_df["effect_on_prediction"] = np.where(
+        shap_local_example_best_df["shap_value"] > 0, "pushes UP",
+        np.where(shap_local_example_best_df["shap_value"] < 0, "pushes DOWN", "neutral")
+    )
+
+    print("\n=== SHAP Local Explanation for your example row (best model) ===")
+    print("Best model:", best_model_name_for_shap)
+    display(shap_local_example_best_df.head(30))
+
+    # Sanity check reconstruction
+    pred_example_best_raw = float(model_best_for_shap.predict(X_new_encoded)[0])
+    reconstructed_pred_best = float(base_value_best + row_shap_values_best.sum())
+
+    print("Base value (expected):", base_value_best)
+    print("Sum SHAP values      :", float(row_shap_values_best.sum()))
+    print("Reconstructed pred   :", reconstructed_pred_best)
+    print("Model raw prediction :", pred_example_best_raw)
+    print("Difference           :", abs(reconstructed_pred_best - pred_example_best_raw))
+
+    # Waterfall plot
+    shap_explanation_new_best = shap.Explanation(
+        values=row_shap_values_best,
+        base_values=base_value_best,
+        data=X_new_encoded.iloc[0].values,
+        feature_names=X_new_encoded.columns.tolist()
+    )
+
+    plt.figure()
+    shap.plots.waterfall(shap_explanation_new_best, max_display=20, show=False)
+    plt.tight_layout()
+    plt.show()
+
+    # Optional: Top positive / negative contributors
+    top_positive_shap_example = (
+        shap_local_example_best_df.sort_values("shap_value", ascending=False)
+        .head(10)[["feature", "feature_value", "shap_value"]]
+    )
+    top_negative_shap_example = (
+        shap_local_example_best_df.sort_values("shap_value", ascending=True)
+        .head(10)[["feature", "feature_value", "shap_value"]]
+    )
+
+    print("\nTop positive contributors (push prediction UP):")
+    display(top_positive_shap_example)
+
+    print("\nTop negative contributors (push prediction DOWN):")
+    display(top_negative_shap_example)
+else:
+    print("\nX_new_encoded not found. Skipping SHAP local explanation for example row.")
+
+
+# ============================================================
+# 17) (Optional) SHAP Local Explanation for BOTH tuned models on your example row
+#     (Random Search + Small Grid Search)
+# ============================================================
+if "X_new_encoded" in globals():
+    # ---- Random Search tuned model local SHAP
+    explainer_random_w = shap.TreeExplainer(model_xgb_weighted_randomsearch)
+    shap_values_new_random_w = explainer_random_w.shap_values(X_new_encoded)
+    base_value_random_w = explainer_random_w.expected_value
+    if isinstance(base_value_random_w, (list, np.ndarray)):
+        base_value_random_w = float(np.array(base_value_random_w).reshape(-1)[0])
+    else:
+        base_value_random_w = float(base_value_random_w)
+
+    row_shap_random_w = np.array(shap_values_new_random_w)[0]
+    shap_local_example_random_w_df = pd.DataFrame({
+        "feature": X_new_encoded.columns.astype(str),
+        "feature_value": X_new_encoded.iloc[0].values,
+        "shap_value": row_shap_random_w,
+        "abs_shap_value": np.abs(row_shap_random_w)
+    }).sort_values("abs_shap_value", ascending=False).reset_index(drop=True)
+    shap_local_example_random_w_df["effect_on_prediction"] = np.where(
+        shap_local_example_random_w_df["shap_value"] > 0, "pushes UP",
+        np.where(shap_local_example_random_w_df["shap_value"] < 0, "pushes DOWN", "neutral")
+    )
+
+    # ---- Small Grid tuned model local SHAP
+    explainer_grid_w = shap.TreeExplainer(model_xgb_weighted_gridsearch_small)
+    shap_values_new_grid_w = explainer_grid_w.shap_values(X_new_encoded)
+    base_value_grid_w = explainer_grid_w.expected_value
+    if isinstance(base_value_grid_w, (list, np.ndarray)):
+        base_value_grid_w = float(np.array(base_value_grid_w).reshape(-1)[0])
+    else:
+        base_value_grid_w = float(base_value_grid_w)
+
+    row_shap_grid_w = np.array(shap_values_new_grid_w)[0]
+    shap_local_example_grid_w_df = pd.DataFrame({
+        "feature": X_new_encoded.columns.astype(str),
+        "feature_value": X_new_encoded.iloc[0].values,
+        "shap_value": row_shap_grid_w,
+        "abs_shap_value": np.abs(row_shap_grid_w)
+    }).sort_values("abs_shap_value", ascending=False).reset_index(drop=True)
+    shap_local_example_grid_w_df["effect_on_prediction"] = np.where(
+        shap_local_example_grid_w_df["shap_value"] > 0, "pushes UP",
+        np.where(shap_local_example_grid_w_df["shap_value"] < 0, "pushes DOWN", "neutral")
+    )
+
+    print("\n=== Local SHAP (Random Search tuned model) - top 20 ===")
+    display(shap_local_example_random_w_df.head(20))
+
+    print("\n=== Local SHAP (Small Grid tuned model) - top 20 ===")
+    display(shap_local_example_grid_w_df.head(20))
+
+
+# ============================================================
+# 18) Save objects for later use
+# ============================================================
+# Models
+saved_model_1_baseline_weighted = model_xgb_weighted_baseline
+saved_model_2_randomsearch_weighted = model_xgb_weighted_randomsearch
+saved_model_3_smallgrid_weighted = model_xgb_weighted_gridsearch_small
+
+# Search objects
+saved_random_search_weighted = random_search_xgb_weighted
+saved_grid_search_weighted_small = grid_search_xgb_weighted_small
+
+# Results tables
+saved_metrics_all_models_test = metrics_all_models_test.copy()
+saved_metrics_all_models_train = metrics_all_models_train.copy()
+saved_cv_results_random_weighted = cv_results_random_weighted_df.copy()
+saved_shap_global_importance_best = shap_global_importance_best_df.copy()
+
+if "X_new_encoded" in globals():
+    saved_predictions_example_compare = predictions_example_compare_df.copy()
+    saved_shap_local_example_best = shap_local_example_best_df.copy()
+
+print("\nSaved objects ✅")
+print("- saved_model_1_baseline_weighted")
+print("- saved_model_2_randomsearch_weighted")
+print("- saved_model_3_smallgrid_weighted")
+print("- saved_random_search_weighted")
+print("- saved_grid_search_weighted_small")
+print("- saved_metrics_all_models_test")
+print("- saved_metrics_all_models_train")
+print("- saved_cv_results_random_weighted")
+print("- saved_shap_global_importance_best")
+if "X_new_encoded" in globals():
+    print("- saved_predictions_example_compare")
+    print("- saved_shap_local_example_best")
+
 ```
