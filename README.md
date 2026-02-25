@@ -1,12 +1,8 @@
 ```
-
 # ============================================================
-# CatBoost Regressor (baseline) — WORKING BLOCK (NO applymap)
-# Fixes:
-# - pd.NA -> np.nan everywhere
-# - explicit categorical columns (so numeric columns don't get mis-detected)
-# - categorical missing -> "__MISSING__" (safe for CatBoost)
-# - numeric columns -> pd.to_numeric(errors="coerce")
+# CatBoost Regressor — Weighted training for imbalanced target
+# (regression sample weights)
+# NO functions — clean blocks
 # ============================================================
 
 import numpy as np
@@ -34,10 +30,9 @@ cat_cols = [
     "model",
     "garantie",
     "list_prest",
-    "code_postal",          # forced categorical
+    "code_postal",   # forced categorical
 ]
 
-# Keep only columns that exist in df
 cat_cols = [c for c in cat_cols if c in df.columns]
 
 
@@ -54,7 +49,7 @@ y = y.loc[mask].astype(float).copy()
 
 
 # ==============================
-# 3) Convert pd.NA -> np.nan (VERY IMPORTANT)
+# 3) Convert pd.NA -> np.nan
 # ==============================
 X = X.replace({pd.NA: np.nan})
 
@@ -64,25 +59,22 @@ X = X.replace({pd.NA: np.nan})
 # ==============================
 for c in cat_cols:
     X[c] = X[c].astype("string")
-    X[c] = X[c].fillna("__MISSING__")   # important: avoid pd.NA / NaN inside cat cols
+    X[c] = X[c].fillna("__MISSING__")
 
 
 # ==============================
-# 5) Convert ALL non-categorical columns to numeric (safe)
-#    (This prevents numeric columns like montant_indem becoming "object" and treated as cat)
+# 5) Convert numeric columns to numeric
 # ==============================
 num_cols = [c for c in X.columns if c not in cat_cols]
 for c in num_cols:
-    X[c] = pd.to_numeric(X[c], errors="coerce")   # keeps np.nan
+    X[c] = pd.to_numeric(X[c], errors="coerce")
 
 
 # ==============================
 # 6) Train/test split
 # ==============================
 X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
-    test_size=0.2,
-    random_state=42
+    X, y, test_size=0.2, random_state=42
 )
 
 print("Train shape:", X_train.shape, y_train.shape)
@@ -90,36 +82,57 @@ print("Test  shape:", X_test.shape, y_test.shape)
 
 
 # ==============================
-# 7) Check missing safely (NO pd.NA comparison!)
+# 7) Build sample weights for regression imbalance (bin inverse freq)
+#    - bins based on quantiles when possible
+#    - weights = 1 / freq(bin)
+#    - normalize around 1
+#    - clip for stability
 # ==============================
-print("\nTop missing columns (train):")
-print(X_train.isna().sum().sort_values(ascending=False).head(10))
+n_bins = 8
+clip_min, clip_max = 0.5, 5.0
 
-print("\nTop missing columns (test):")
-print(X_test.isna().sum().sort_values(ascending=False).head(10))
+# bins on y_train only
+try:
+    y_bins = pd.qcut(y_train, q=min(n_bins, y_train.nunique()), duplicates="drop")
+except Exception:
+    y_bins = pd.cut(y_train, bins=min(n_bins, max(2, y_train.nunique())))
 
-# Extra: verify categorical cols have no missing (we filled them)
-print("\nAny missing inside categorical columns (train)?",
-      X_train[cat_cols].isna().to_numpy().any())
-print("Any missing inside categorical columns (test)?",
-      X_test[cat_cols].isna().to_numpy().any())
+bin_counts = y_bins.value_counts()
+weights_train = y_bins.map(lambda b: 1.0 / bin_counts[b]).astype(float).values
 
-print("\nCategorical cols used:", cat_cols)
+# normalize and clip
+weights_train = weights_train / np.mean(weights_train)
+weights_train = np.clip(weights_train, clip_min, clip_max)
+
+print("\nSample weights summary:")
+print(pd.Series(weights_train).describe())
+
+print("\nAverage weight by bin:")
+tmp = pd.DataFrame({"y": y_train.values, "bin": y_bins.astype(str).values, "w": weights_train})
+print(tmp.groupby("bin")["w"].agg(["count", "mean", "min", "max"]).sort_index())
 
 
 # ==============================
-# 8) Build CatBoost Pools
+# 8) Build Pools (train with weights)
 # ==============================
-train_pool = Pool(X_train, y_train, cat_features=cat_cols)
-test_pool  = Pool(X_test,  y_test,  cat_features=cat_cols)
+train_pool_w = Pool(
+    X_train, y_train,
+    cat_features=cat_cols,
+    weight=weights_train
+)
+
+test_pool = Pool(
+    X_test, y_test,
+    cat_features=cat_cols
+)
 
 
 # ==============================
-# 9) Train baseline CatBoost Regressor
+# 9) Train weighted CatBoost model
 # ==============================
-cat_model_baseline = CatBoostRegressor(
+cat_model_weighted = CatBoostRegressor(
     loss_function="RMSE",
-    iterations=2000,
+    iterations=2500,
     learning_rate=0.05,
     depth=8,
     l2_leaf_reg=3.0,
@@ -129,44 +142,44 @@ cat_model_baseline = CatBoostRegressor(
     allow_writing_files=False
 )
 
-cat_model_baseline.fit(
-    train_pool,
+cat_model_weighted.fit(
+    train_pool_w,
     eval_set=test_pool,
     use_best_model=True,
     early_stopping_rounds=200
 )
 
-print("\nCatBoost baseline trained ✅")
+print("\nCatBoost weighted model trained ✅")
 
 
 # ==============================
-# 10) Metrics + tolerance accuracy
+# 10) Metrics + tolerance accuracy (weighted model)
 # ==============================
-pred_train = np.clip(cat_model_baseline.predict(X_train), 0, 10)
-pred_test  = np.clip(cat_model_baseline.predict(X_test),  0, 10)
+pred_train_w = np.clip(cat_model_weighted.predict(X_train), 0, 10)
+pred_test_w  = np.clip(cat_model_weighted.predict(X_test),  0, 10)
 
-mae_train = mean_absolute_error(y_train, pred_train)
-rmse_train = np.sqrt(mean_squared_error(y_train, pred_train))
-r2_train = r2_score(y_train, pred_train)
+mae_train_w = mean_absolute_error(y_train, pred_train_w)
+rmse_train_w = np.sqrt(mean_squared_error(y_train, pred_train_w))
+r2_train_w = r2_score(y_train, pred_train_w)
 
-mae_test = mean_absolute_error(y_test, pred_test)
-rmse_test = np.sqrt(mean_squared_error(y_test, pred_test))
-r2_test = r2_score(y_test, pred_test)
+mae_test_w = mean_absolute_error(y_test, pred_test_w)
+rmse_test_w = np.sqrt(mean_squared_error(y_test, pred_test_w))
+r2_test_w = r2_score(y_test, pred_test_w)
 
-print("\n=== CatBoost Baseline Metrics ===")
-print(f"Train: MAE={mae_train:.4f} | RMSE={rmse_train:.4f} | R2={r2_train:.4f}")
-print(f"Test : MAE={mae_test:.4f} | RMSE={rmse_test:.4f} | R2={r2_test:.4f}")
+print("\n=== CatBoost Weighted Metrics ===")
+print(f"Train: MAE={mae_train_w:.4f} | RMSE={rmse_train_w:.4f} | R2={r2_train_w:.4f}")
+print(f"Test : MAE={mae_test_w:.4f} | RMSE={rmse_test_w:.4f} | R2={r2_test_w:.4f}")
 
 tol = 1.0
-acc_train = (np.abs(y_train.values - pred_train) <= tol).mean() * 100
-acc_test  = (np.abs(y_test.values  - pred_test)  <= tol).mean() * 100
-print(f"\nAccuracy within ±{tol} point:")
-print(f"Train: {acc_train:.2f}%")
-print(f"Test : {acc_test:.2f}%")
+acc_train_w = (np.abs(y_train.values - pred_train_w) <= tol).mean() * 100
+acc_test_w  = (np.abs(y_test.values  - pred_test_w)  <= tol).mean() * 100
+print(f"\nAccuracy within ±{tol} point (weighted):")
+print(f"Train: {acc_train_w:.2f}%")
+print(f"Test : {acc_test_w:.2f}%")
 
 
 # ==============================
-# 11) Predict on your example row (and align columns)
+# 11) Predict on your example row (same as baseline)
 # ==============================
 new_rows = [{
     "PARCOURS_FINAL": "HORS_APPLE_EE",
@@ -215,38 +228,38 @@ X_new = X_new.replace({pd.NA: np.nan})
 for c in cat_cols:
     X_new[c] = X_new[c].astype("string").fillna("__MISSING__")
 
-num_cols = [c for c in X_new.columns if c not in cat_cols]
-for c in num_cols:
+num_cols_new = [c for c in X_new.columns if c not in cat_cols]
+for c in num_cols_new:
     X_new[c] = pd.to_numeric(X_new[c], errors="coerce")
 
-pred_new = float(np.clip(cat_model_baseline.predict(X_new)[0], 0, 10))
-print("\n=== Example prediction ===")
-print("Predicted note:", pred_new)
+pred_new_w = float(np.clip(cat_model_weighted.predict(X_new)[0], 0, 10))
+print("\n=== Example prediction (weighted) ===")
+print("Predicted note:", pred_new_w)
 
 
 # ==============================
-# 12) SHAP (global + example)
+# 12) SHAP (global + example) for weighted model
 # ==============================
-# Use a sample for speed
 sample_size = min(300, len(X_test))
 X_shap = X_test.sample(sample_size, random_state=42).copy()
 
-explainer = shap.TreeExplainer(cat_model_baseline)
-shap_values = explainer.shap_values(X_shap)
+explainer_w = shap.TreeExplainer(cat_model_weighted)
+shap_values_w = explainer_w.shap_values(X_shap)
 
-print("\nSHAP: global importance")
-shap.summary_plot(shap_values, X_shap, show=True)
+print("\nSHAP (weighted): global importance")
+shap.summary_plot(shap_values_w, X_shap, show=True)
 
-print("\nSHAP: explanation for the example row")
-shap_values_one = explainer.shap_values(X_new)
+print("\nSHAP (weighted): explanation for the example row")
+shap_values_one_w = explainer_w.shap_values(X_new)
 
 shap.plots.waterfall(
     shap.Explanation(
-        values=shap_values_one[0],
-        base_values=explainer.expected_value,
+        values=shap_values_one_w[0],
+        base_values=explainer_w.expected_value,
         data=X_new.iloc[0],
         feature_names=X_new.columns
     )
 )
 plt.show()
+
 ```
