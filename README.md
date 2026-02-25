@@ -1,313 +1,519 @@
 ```
-Perfect — this is the right next step.
+Perfect — let’s extend the weighted model with:
+	1.	SHAP feature importance (global)
+	2.	SHAP explanation for your exact new example row
+	3.	Predict the value for that example
+	4.	(Optional) compare baseline vs weighted prediction on that same row
 
-For regression with imbalanced target (for example many values around one range and few rare values), we usually use sample weights so the model pays more attention to underrepresented target ranges.
-
-Idea (simple)
-	•	Common target values/ranges → smaller weight
-	•	Rare target values/ranges → larger weight
-
-This helps XGBoost not ignore rare cases.
+Since you already have the example row and encoding flow, I’ll give you the blocks after weighted training (xgb_reg_weighted) and using your same variables.
 
 ⸻
 
-Weighted training for imbalanced target (regression sample weights)
+1) SHAP for weighted XGBoost (global feature importance)
 
-1) Create target bins on train only (important)
-
-We bin y_train into ranges, then compute how frequent each bin is.
+This shows which features influence the weighted model most overall.
 
 # ==============================
-# 1) Create bins on y_train (train only)
+# 8) SHAP - Global feature importance (weighted model)
+# ==============================
+# Install once if needed:
+# !pip install shap
+
+import shap
+import matplotlib.pyplot as plt
+import numpy as np
+import pandas as pd
+
+# Make sure feature names are strings and safe for SHAP/XGBoost
+X_train_shap = X_train_encoded.copy()
+X_test_shap = X_test_encoded.copy()
+
+X_train_shap.columns = X_train_shap.columns.astype(str)
+X_test_shap.columns = X_test_shap.columns.astype(str)
+
+# (Optional but recommended) use a sample for speed if dataset is large
+# Change 1000 if you want more/less
+shap_sample_size = min(1000, len(X_train_shap))
+X_shap_sample = X_train_shap.sample(shap_sample_size, random_state=42)
+
+# Build explainer
+explainer_w = shap.TreeExplainer(xgb_reg_weighted)
+
+# Compute SHAP values on sample
+shap_values_w_sample = explainer_w.shap_values(X_shap_sample)
+
+print("SHAP values shape (sample):", np.array(shap_values_w_sample).shape)
+print("SHAP sample shape:", X_shap_sample.shape)
+
+SHAP summary plot (global importance)
+
+# ==============================
+# 9) SHAP summary plot (global)
+# ==============================
+plt.figure()
+shap.summary_plot(shap_values_w_sample, X_shap_sample, show=False)
+plt.tight_layout()
+plt.show()
+
+SHAP bar plot (global top features)
+
+# ==============================
+# 10) SHAP bar plot (global top features)
+# ==============================
+plt.figure()
+shap.summary_plot(shap_values_w_sample, X_shap_sample, plot_type="bar", show=False)
+plt.tight_layout()
+plt.show()
+
+Global SHAP importance table (clean dataframe)
+
+# ==============================
+# 11) Global SHAP importance table (weighted model)
+# ==============================
+mean_abs_shap_w = np.abs(shap_values_w_sample).mean(axis=0)
+
+shap_importance_weighted_df = pd.DataFrame({
+    "feature": X_shap_sample.columns.astype(str),
+    "mean_abs_shap": mean_abs_shap_w
+}).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+
+print("Top 20 global SHAP features (weighted model):")
+display(shap_importance_weighted_df.head(20))
+
+
+⸻
+
+2) Encode your exact example row (same encoding logic as training) and predict with weighted model
+
+You asked to use the exact row from your image.
+Below is a clean block that:
+	•	builds X_new from your row
+	•	applies the same transforms
+	•	aligns columns with X_train_encoded
+	•	predicts with xgb_reg_weighted
+
+A) Create your example row exactly (from your image)
+
+I copied your example as shown. Adjust only if one value differs in your notebook.
+
+# ==============================
+# 12) Your exact example row (from image)
 # ==============================
 import numpy as np
 import pandas as pd
 
-# Make sure target is numeric
-y_train = pd.to_numeric(y_train, errors="coerce").astype(float)
-y_test = pd.to_numeric(y_test, errors="coerce").astype(float)
+new_rows = [
+    {
+        "PARCOURS_FINAL": "HORS_APPLE_EE",
+        "PARCOURS_INITIAL": "HORS_APPLE_EE",
+        "tarif": 19.99,
+        "Nombre_sisnitre_client": 1,
+        "Nombre_sisnitre_accepte_client": 1,
+        "Nombre_sisnitre_refuse_client": np.nan,
+        "Nombre_sisnitre_sans_suite_client": np.nan,
+        "code_postal": 59700,
 
-# Example for target in [0..10]
-# You can adjust bins later (more/fewer bins)
-bin_edges = np.array([0, 2, 4, 6, 8, 10, np.inf])
+        "operating_system": "Android",
+        "marque": "Google",
+        "model": "Pixel 7 Pro ",
+        "ancienneté_de_contrat": 509555,
+        "garantie": "Dommage",
+        "Age": 43,
+        "dossier_complet": 1,
+        "decision_ai": 0,
+        "nombre_prestation_ko": 0,
+        "Nbr_ticket_pieces": 0,
+        "Nbr_ticket_information": 4,
+        "list_prest": "ADVANCED_SWAP",
+        "delai_declaration": 279000,
+        "delai_de_completude": np.nan,
+        "delai_decision": 13090,
+        "delai_reparation": 4,
+        "delai_indemnisation": 4,
+        "montant_indem": np.nan,
+        "delai_Sinistre": 602000
+    }
+]
 
-# Bin labels for train and test (for analysis only)
-y_train_bins = pd.cut(y_train, bins=bin_edges, right=False, include_lowest=True)
-y_test_bins  = pd.cut(y_test,  bins=bin_edges, right=False, include_lowest=True)
-
-print("Train target bin distribution:")
-display(y_train_bins.value_counts(dropna=False).sort_index())
-
-print("\nTest target bin distribution:")
-display(y_test_bins.value_counts(dropna=False).sort_index())
-
-
-⸻
-
-2) Compute sample weights from train bin frequencies
-
-Rare bins get higher weights.
-
-# ==============================
-# 2) Compute inverse-frequency sample weights (train only)
-# ==============================
-train_bin_counts = y_train_bins.value_counts(dropna=False)
-
-# Map each train row's bin -> count
-train_bin_count_per_row = y_train_bins.map(train_bin_counts)
-
-# Inverse frequency weight
-# (rare bins => larger weight)
-sample_weight_train = 1.0 / train_bin_count_per_row.astype(float)
-
-# Normalize weights so average weight ~= 1 (recommended)
-sample_weight_train = sample_weight_train / sample_weight_train.mean()
-
-print("Sample weights summary:")
-print(pd.Series(sample_weight_train).describe())
-
-# Optional: inspect average weight per bin
-weights_debug = pd.DataFrame({
-    "y_train": y_train.values,
-    "bin": y_train_bins.astype(str).values,
-    "weight": np.asarray(sample_weight_train, dtype=float)
-})
-
-print("\nAverage weight per bin:")
-display(weights_debug.groupby("bin")["weight"].agg(["count", "mean", "min", "max"]).sort_index())
+X_new = pd.DataFrame(new_rows)
+print("X_new shape:", X_new.shape)
+display(X_new)
 
 
 ⸻
 
-3) Train weighted XGBoost regressor
+B) Apply the same preprocessing/encoding to X_new
 
-Same model as baseline, but pass sample_weight=sample_weight_train.
+This block assumes you still have these variables from training:
+	•	onehot_cols
+	•	target_encode_cols
+	•	freq_encode_cols
+	•	force_categorical_cols
+	•	encoding_artifacts
+	•	optionally log_transform_cols (if you created it before)
+
+It also handles your previous error (missing onehot_encoder) by using the stored OHE if available.
+If OHE wasn’t stored, I also added a safe fallback using the stored created OHE columns.
 
 # ==============================
-# 3) Weighted XGBoost Regressor (imbalanced target-aware)
+# 13) Encode X_new exactly like training (no functions)
 # ==============================
-from xgboost import XGBRegressor
 
-xgb_reg_weighted = XGBRegressor(
-    objective="reg:squarederror",
-    eval_metric="rmse",
+X_new_encoded_work = X_new.copy()
 
-    n_estimators=500,
-    learning_rate=0.03,
-    max_depth=6,
-    min_child_weight=3,
-    gamma=0.0,
+# ------------------------------
+# A) Make sure expected columns exist (based on original df columns)
+# ------------------------------
+# If you still have df from training, use it as reference:
+for c in df.columns:
+    if c == target_col:
+        continue
+    if c not in X_new_encoded_work.columns:
+        X_new_encoded_work[c] = np.nan
 
-    subsample=0.8,
-    colsample_bytree=0.8,
-    colsample_bylevel=1.0,
-    colsample_bynode=1.0,
+# Keep only training feature columns before encoding (same raw order if possible)
+raw_feature_cols = [c for c in df.columns if c != target_col]
+X_new_encoded_work = X_new_encoded_work[raw_feature_cols].copy()
 
-    reg_alpha=0.0,
-    reg_lambda=1.0,
+# ------------------------------
+# B) Force selected categorical cols to string
+# ------------------------------
+for c in force_categorical_cols:
+    if c in X_new_encoded_work.columns:
+        X_new_encoded_work[c] = X_new_encoded_work[c].astype("string")
 
-    tree_method="hist",
-    grow_policy="depthwise",
-    max_leaves=0,
+# ------------------------------
+# C) Convert numeric-like columns (except selected categorical columns)
+# ------------------------------
+categorical_selected = set(onehot_cols + target_encode_cols + freq_encode_cols + force_categorical_cols)
 
-    missing=np.nan,
+for c in X_new_encoded_work.columns:
+    if c not in categorical_selected:
+        X_new_encoded_work[c] = pd.to_numeric(X_new_encoded_work[c], errors="coerce")
 
-    n_jobs=-1,
-    random_state=42,
-    verbosity=0
+# ------------------------------
+# D) Apply same "0 -> np.nan" business rule if you used it on specific columns
+#    (edit this list to match your training)
+# ------------------------------
+zero_to_nan_cols = [
+    "Nombre_sisnitre_refuse_client",
+    "Nombre_sisnitre_sans_suite_client",
+    "delai_de_completude",
+    "montant_indem"
+]
+
+for c in zero_to_nan_cols:
+    if c in X_new_encoded_work.columns:
+        X_new_encoded_work[c] = pd.to_numeric(X_new_encoded_work[c], errors="coerce")
+        X_new_encoded_work[c] = X_new_encoded_work[c].replace(0, np.nan)
+
+# ------------------------------
+# E) Log transform on selected numeric columns (same as training, if used)
+# ------------------------------
+# If you used a list before, keep it. If not, this safely skips.
+if "log_transform_cols" in globals():
+    for c in log_transform_cols:
+        if c in X_new_encoded_work.columns:
+            X_new_encoded_work[c] = pd.to_numeric(X_new_encoded_work[c], errors="coerce")
+            # log1p only for non-negative values
+            X_new_encoded_work[c] = np.where(
+                X_new_encoded_work[c].notna() & (X_new_encoded_work[c] >= 0),
+                np.log1p(X_new_encoded_work[c]),
+                X_new_encoded_work[c]
+            )
+
+# ------------------------------
+# F) Frequency / Count Encoding (using train maps)
+# ------------------------------
+freq_maps = encoding_artifacts.get("frequency_encoding_maps", {})
+
+for c in freq_encode_cols:
+    if c in X_new_encoded_work.columns:
+        X_new_encoded_work[c] = X_new_encoded_work[c].astype("string")
+        freq_map_c = freq_maps.get(c, {})
+        X_new_encoded_work[c] = X_new_encoded_work[c].map(freq_map_c)
+
+        # Fill unseen categories with 0 (or np.nan if you prefer)
+        X_new_encoded_work[c] = X_new_encoded_work[c].fillna(0)
+
+# ------------------------------
+# G) Target Encoding (using train maps + global mean)
+# ------------------------------
+target_maps = encoding_artifacts.get("target_encoding_maps", {})
+global_target_mean = encoding_artifacts.get("target_encoding_global_mean", float(pd.to_numeric(y_train, errors="coerce").mean()))
+
+for c in target_encode_cols:
+    if c in X_new_encoded_work.columns:
+        X_new_encoded_work[c] = X_new_encoded_work[c].astype("string")
+        te_map_c = target_maps.get(c, {})
+        X_new_encoded_work[c] = X_new_encoded_work[c].map(te_map_c).fillna(global_target_mean)
+
+# ------------------------------
+# H) One-Hot Encoding (use fitted encoder if stored)
+# ------------------------------
+# Try common keys (depending on how you stored it)
+ohe = None
+for k in ["onehot_encoder", "ohe", "fitted_onehot_encoder"]:
+    if k in encoding_artifacts:
+        ohe = encoding_artifacts[k]
+        break
+
+if len(onehot_cols) > 0:
+    # Ensure columns exist and are strings
+    for c in onehot_cols:
+        if c not in X_new_encoded_work.columns:
+            X_new_encoded_work[c] = pd.Series([pd.NA] * len(X_new_encoded_work), dtype="string")
+        else:
+            X_new_encoded_work[c] = X_new_encoded_work[c].astype("string")
+
+    if ohe is not None:
+        X_new_ohe_arr = ohe.transform(X_new_encoded_work[onehot_cols])
+
+        if hasattr(X_new_ohe_arr, "toarray"):
+            X_new_ohe_arr = X_new_ohe_arr.toarray()
+
+        ohe_feature_names = ohe.get_feature_names_out(onehot_cols).tolist()
+
+        X_new_ohe = pd.DataFrame(
+            X_new_ohe_arr,
+            columns=ohe_feature_names,
+            index=X_new_encoded_work.index
+        )
+
+        X_new_encoded_work = X_new_encoded_work.drop(columns=[c for c in onehot_cols if c in X_new_encoded_work.columns])
+        X_new_encoded_work = pd.concat([X_new_encoded_work, X_new_ohe], axis=1)
+
+    else:
+        # Fallback if encoder object was not saved:
+        # Use the training-created OHE columns list and manually create 0/1 columns only for matching categories
+        print("⚠️ onehot_encoder not found in encoding_artifacts. Using fallback alignment by final columns only.")
+        print("   This works for prediction only if your row categories match existing OHE columns in X_train_encoded.")
+
+# ------------------------------
+# I) Final align to training encoded columns (MOST IMPORTANT)
+# ------------------------------
+# Add missing encoded columns as 0, drop extras, reorder exactly like train
+for c in X_train_encoded.columns:
+    if c not in X_new_encoded_work.columns:
+        X_new_encoded_work[c] = 0
+
+extra_cols = [c for c in X_new_encoded_work.columns if c not in X_train_encoded.columns]
+if len(extra_cols) > 0:
+    X_new_encoded_work = X_new_encoded_work.drop(columns=extra_cols)
+
+X_new_encoded = X_new_encoded_work[X_train_encoded.columns].copy()
+
+# Convert all to numeric float
+for c in X_new_encoded.columns:
+    X_new_encoded[c] = pd.to_numeric(X_new_encoded[c], errors="coerce")
+
+X_new_encoded = X_new_encoded.astype(float)
+
+# Clean feature names (same rule as training)
+X_new_encoded.columns = (
+    X_new_encoded.columns.astype(str)
+    .str.replace("[", "(", regex=False)
+    .str.replace("]", ")", regex=False)
+    .str.replace("<", "_lt_", regex=False)
 )
 
-# Train with sample weights
-xgb_reg_weighted.fit(
-    X_train_encoded,
-    y_train,
-    sample_weight=np.asarray(sample_weight_train, dtype=float)
+# Also ensure training/test columns are same cleaned names if not already done
+X_train_encoded.columns = (
+    X_train_encoded.columns.astype(str)
+    .str.replace("[", "(", regex=False)
+    .str.replace("]", ")", regex=False)
+    .str.replace("<", "_lt_", regex=False)
+)
+X_test_encoded.columns = (
+    X_test_encoded.columns.astype(str)
+    .str.replace("[", "(", regex=False)
+    .str.replace("]", ")", regex=False)
+    .str.replace("<", "_lt_", regex=False)
 )
 
-print("Weighted XGBoost model trained successfully ✅")
+# Re-align again after cleaning names
+X_new_encoded = X_new_encoded.reindex(columns=X_train_encoded.columns, fill_value=0)
+
+print("X_new_encoded.shape:", X_new_encoded.shape)
+print("Expected shape      :", (len(X_new_encoded), X_train_encoded.shape[1]))
+display(X_new_encoded.head())
 
 
 ⸻
 
-4) Predict (train + test)
+3) Predict your example row with the weighted model
 
 # ==============================
-# 4) Predictions (weighted model)
+# 14) Predict your example row (weighted model)
 # ==============================
-pred_train_w = xgb_reg_weighted.predict(X_train_encoded)
-pred_test_w  = xgb_reg_weighted.predict(X_test_encoded)
+pred_new_weighted = xgb_reg_weighted.predict(X_new_encoded)
 
-# Optional clip to business target range (0..10)
-pred_train_w_clipped = np.clip(pred_train_w, 0, 10)
-pred_test_w_clipped  = np.clip(pred_test_w, 0, 10)
+# Optional clip to business range
+pred_new_weighted_clipped = np.clip(pred_new_weighted, 0, 10)
 
-print("Weighted prediction done ✅")
-print("Train predictions sample:", pred_train_w_clipped[:10])
-print("Test predictions sample :", pred_test_w_clipped[:10])
+print("Weighted model prediction (raw):", pred_new_weighted[0])
+print("Weighted model prediction (clipped 0..10):", pred_new_weighted_clipped[0])
+
+Optional: compare with baseline model on the same row
+
+# ==============================
+# 15) Compare baseline vs weighted prediction on same row (optional)
+# ==============================
+if "baseline_xgb_model" in globals():
+    pred_new_baseline = baseline_xgb_model.predict(X_new_encoded)
+    pred_new_baseline_clipped = np.clip(pred_new_baseline, 0, 10)
+
+    print("Baseline prediction (clipped):", pred_new_baseline_clipped[0])
+    print("Weighted prediction (clipped):", pred_new_weighted_clipped[0])
+else:
+    print("baseline_xgb_model not found (skip baseline comparison)")
 
 
 ⸻
 
-5) Evaluate weighted model (same metrics)
+4) SHAP explanation for this specific example row (why this prediction)
+
+This is exactly what you asked: show which features pushed the prediction up/down for that one row.
 
 # ==============================
-# 5) Weighted model evaluation
+# 16) SHAP for this specific example row (weighted model)
 # ==============================
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_squared_error,
-    r2_score,
-    median_absolute_error,
-    max_error,
-    explained_variance_score
+# Use same explainer if already created; otherwise create it
+if "explainer_w" not in globals():
+    import shap
+    explainer_w = shap.TreeExplainer(xgb_reg_weighted)
+
+# SHAP values for the single row
+shap_values_new_w = explainer_w.shap_values(X_new_encoded)
+
+print("SHAP values shape for new row:", np.array(shap_values_new_w).shape)
+
+Contribution table (best for debugging and understanding)
+
+# ==============================
+# 17) SHAP contribution table for the new row
+# ==============================
+# Base value (expected model output)
+base_value_w = explainer_w.expected_value
+if isinstance(base_value_w, (list, np.ndarray)):
+    base_value_w = np.array(base_value_w).reshape(-1)[0]
+
+# Single row arrays
+row_values = X_new_encoded.iloc[0]
+row_shap_values = np.array(shap_values_new_w)[0]
+
+shap_row_contrib_df = pd.DataFrame({
+    "feature": X_new_encoded.columns.astype(str),
+    "feature_value": row_values.values,
+    "shap_value": row_shap_values,
+    "abs_shap_value": np.abs(row_shap_values)
+}).sort_values("abs_shap_value", ascending=False).reset_index(drop=True)
+
+# Add direction label
+shap_row_contrib_df["effect_on_prediction"] = np.where(
+    shap_row_contrib_df["shap_value"] > 0, "pushes UP",
+    np.where(shap_row_contrib_df["shap_value"] < 0, "pushes DOWN", "neutral")
 )
 
-# --- Train metrics
-mae_train_w = mean_absolute_error(y_train, pred_train_w_clipped)
-mse_train_w = mean_squared_error(y_train, pred_train_w_clipped)
-rmse_train_w = np.sqrt(mse_train_w)
-r2_train_w = r2_score(y_train, pred_train_w_clipped)
-medae_train_w = median_absolute_error(y_train, pred_train_w_clipped)
-maxerr_train_w = max_error(y_train, pred_train_w_clipped)
-evs_train_w = explained_variance_score(y_train, pred_train_w_clipped)
+print("Top features that influenced THIS prediction:")
+display(shap_row_contrib_df.head(25))
 
-# --- Test metrics
-mae_test_w = mean_absolute_error(y_test, pred_test_w_clipped)
-mse_test_w = mean_squared_error(y_test, pred_test_w_clipped)
-rmse_test_w = np.sqrt(mse_test_w)
-r2_test_w = r2_score(y_test, pred_test_w_clipped)
-medae_test_w = median_absolute_error(y_test, pred_test_w_clipped)
-maxerr_test_w = max_error(y_test, pred_test_w_clipped)
-evs_test_w = explained_variance_score(y_test, pred_test_w_clipped)
+# Sanity check: base + sum(shap) ~= prediction (raw)
+pred_check = float(pred_new_weighted[0])
+reconstructed_pred = float(base_value_w + row_shap_values.sum())
 
-eps = 1e-8
-mape_test_w = np.mean(np.abs((y_test - pred_test_w_clipped) / np.maximum(np.abs(y_test), eps))) * 100
-smape_test_w = np.mean(
-    2.0 * np.abs(pred_test_w_clipped - y_test) / np.maximum(np.abs(y_test) + np.abs(pred_test_w_clipped), eps)
-) * 100
+print("Base value (expected):", base_value_w)
+print("Sum SHAP values      :", row_shap_values.sum())
+print("Reconstructed pred   :", reconstructed_pred)
+print("Model raw prediction :", pred_check)
+print("Difference           :", abs(reconstructed_pred - pred_check))
 
-weighted_metrics = pd.DataFrame({
-    "Metric": ["MAE", "MSE", "RMSE", "R2", "MedianAE", "MaxError", "ExplainedVariance", "MAPE_%", "sMAPE_%"],
-    "Train_weighted": [mae_train_w, mse_train_w, rmse_train_w, r2_train_w, medae_train_w, maxerr_train_w, evs_train_w, np.nan, np.nan],
-    "Test_weighted":  [mae_test_w, mse_test_w, rmse_test_w, r2_test_w, medae_test_w, maxerr_test_w, evs_test_w, mape_test_w, smape_test_w]
-})
-
-print("\n=== Weighted XGBoost Regressor Results ===")
-display(weighted_metrics)
-
-
-⸻
-
-6) Compare baseline vs weighted (very important)
-
-This tells you if weighting actually helped.
+SHAP waterfall plot (single prediction explanation)
 
 # ==============================
-# 6) Compare baseline vs weighted
-# Requires baseline metrics variables from your previous step
+# 18) SHAP waterfall plot for this example row
 # ==============================
-comparison_df = pd.DataFrame({
-    "Metric": ["MAE", "RMSE", "R2", "MedianAE", "MaxError", "ExplainedVariance", "MAPE_%", "sMAPE_%"],
-    "Baseline_Test": [
-        mae_test, rmse_test, r2_test, medae_test, maxerr_test, evs_test, mape_test, smape_test
-    ],
-    "Weighted_Test": [
-        mae_test_w, rmse_test_w, r2_test_w, medae_test_w, maxerr_test_w, evs_test_w, mape_test_w, smape_test_w
-    ],
-    "Better if": ["Lower", "Lower", "Higher", "Lower", "Lower", "Higher", "Lower", "Lower"]
-})
+import shap
+import matplotlib.pyplot as plt
 
-print("\n=== Baseline vs Weighted (TEST) ===")
-display(comparison_df)
-
-
-⸻
-
-7) Check performance by target bin (this is where weighted models often help)
-
-Global metrics may look similar, but rare bins can improve a lot.
-
-# ==============================
-# 7) Error by target bin (TEST)
-# ==============================
-test_eval_bins = pd.DataFrame({
-    "y_true": y_test.values,
-    "y_bin": y_test_bins.astype(str).values,
-    "pred_baseline": pred_test_clipped,
-    "pred_weighted": pred_test_w_clipped
-})
-
-test_eval_bins["abs_err_baseline"] = np.abs(test_eval_bins["y_true"] - test_eval_bins["pred_baseline"])
-test_eval_bins["abs_err_weighted"] = np.abs(test_eval_bins["y_true"] - test_eval_bins["pred_weighted"])
-
-bin_comparison = (
-    test_eval_bins
-    .groupby("y_bin")
-    .agg(
-        count=("y_true", "size"),
-        y_mean=("y_true", "mean"),
-        mae_baseline=("abs_err_baseline", "mean"),
-        mae_weighted=("abs_err_weighted", "mean")
-    )
-    .reset_index()
+# Build explanation object
+shap_exp_new = shap.Explanation(
+    values=row_shap_values,
+    base_values=base_value_w,
+    data=X_new_encoded.iloc[0].values,
+    feature_names=X_new_encoded.columns.tolist()
 )
 
-bin_comparison["improvement_weighted_vs_baseline"] = (
-    bin_comparison["mae_baseline"] - bin_comparison["mae_weighted"]
+plt.figure()
+shap.plots.waterfall(shap_exp_new, max_display=20, show=False)
+plt.tight_layout()
+plt.show()
+
+SHAP force plot (optional, interactive in notebook)
+
+# ==============================
+# 19) SHAP force plot (optional)
+# ==============================
+shap.initjs()
+shap.force_plot(
+    base_value_w,
+    row_shap_values,
+    X_new_encoded.iloc[0],
+    matplotlib=True
 )
 
-print("\n=== Test MAE by target bin ===")
-display(bin_comparison.sort_values("y_bin"))
+
+⸻
+
+5) Small explanation of what you’ll see (quick)
+	•	Global SHAP (summary/bar): which features are important across many rows
+	•	Row SHAP (waterfall/table): why this specific row got this prediction
+	•	positive SHAP → pushes prediction up
+	•	negative SHAP → pushes prediction down
+
+⸻
+
+Important fix for your earlier onehot_encoder error
+
+You got:
+
+Missing encoding_artifacts['onehot_encoder']
+
+That means during training you saved:
+	•	maps (frequency_encoding_maps, target_encoding_maps)
+	•	but not the fitted OneHotEncoder object
+
+Save it during training (must do once)
+
+When you fit OHE in training, add this line:
+
+encoding_artifacts["onehot_encoder"] = ohe
+
+Also keep:
+
+encoding_artifacts["onehot_columns_created"] = X_train_ohe.columns.tolist()  # if you already create this
+
+If you want, I can give you the exact training encoding block patch (1–2 lines in the right place) so prediction on new rows always works without errors.
+
+⸻
+
+Bonus: quick “prediction summary” print for your example
+
+# ==============================
+# 20) Clean summary for your example row
+# ==============================
+print("=== New Example Prediction Summary ===")
+print("Weighted model predicted evaluate_note (raw):", float(pred_new_weighted[0]))
+print("Weighted model predicted evaluate_note (clipped 0..10):", float(pred_new_weighted_clipped[0]))
+
+print("\nTop 10 drivers of this prediction (absolute SHAP):")
+display(shap_row_contrib_df[["feature", "feature_value", "shap_value", "effect_on_prediction"]].head(10))
 
 
 ⸻
 
-Important notes (very useful)
-	•	Create weights using train only ✅ (you did that above)
-	•	Weighting may:
-	•	improve rare target ranges
-	•	slightly worsen common ranges
-	•	change global RMSE only a little
-	•	That’s why bin-level evaluation is critical
-
-⸻
-
-Better weighting variants (optional, try later)
-
-If inverse frequency is too aggressive, use softer weights:
-
-A) Square-root inverse frequency (more stable)
-
-sample_weight_train_sqrt = 1.0 / np.sqrt(train_bin_count_per_row.astype(float))
-sample_weight_train_sqrt = sample_weight_train_sqrt / sample_weight_train_sqrt.mean()
-
-B) Cap extreme weights (prevents overfitting rare bins)
-
-sample_weight_train_capped = np.asarray(sample_weight_train, dtype=float).copy()
-sample_weight_train_capped = np.clip(sample_weight_train_capped, 0.5, 5.0)
-sample_weight_train_capped = sample_weight_train_capped / sample_weight_train_capped.mean()
-
-Then retrain with the same block using sample_weight=sample_weight_train_capped.
-
-⸻
-
-“Accuracy-like” score for weighted model (optional)
-
-If you want the same tolerance metric:
-
-tol = 1.0
-
-acc_test_tol_baseline = (np.abs(y_test - pred_test_clipped) <= tol).mean() * 100
-acc_test_tol_weighted = (np.abs(y_test - pred_test_w_clipped) <= tol).mean() * 100
-
-print(f"Baseline tolerance accuracy (±{tol}): {acc_test_tol_baseline:.2f}%")
-print(f"Weighted tolerance accuracy (±{tol}): {acc_test_tol_weighted:.2f}%")
-
-
-⸻
-
-If you want, next I can give you the Random Search block (no functions) with a small smart hyperparameter space (fast enough) for:
-	•	baseline model
-	•	weighted model (with sample_weight)
+If you want next, I can give you the same SHAP + prediction block for the baseline model too, so you compare:
+	•	baseline prediction + explanation
+	•	weighted prediction + explanation
 
 ```
