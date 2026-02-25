@@ -1,280 +1,261 @@
 ```
-Excellent — let’s do Step 1 now: Baseline XGBoost Regressor (normal training) using your current variables:
-	•	X_train_encoded
-	•	X_test_encoded
-	•	y_train
-	•	y_test
 
-No functions, clean blocks, and simple explanations.
+Perfect — now that the baseline XGBoost training works, let’s add exactly the two things you asked for:
+	1.	SHAP (feature importance + explanation)
+	2.	Predict your new_rows example with the trained model (xgb_reg)
+
+I’ll keep it clean, notebook-style, no functions ✅
 
 ⸻
 
-1) Import what we need for training + evaluation
+12) SHAP for feature importance (global + local)
+
+12.1 Install/import SHAP (if needed)
+
+# If SHAP is not installed, run once:
+# !pip install shap
 
 # ==============================
-# 1) Imports for XGBoost training + evaluation
+# 12) Imports for SHAP
 # ==============================
-from xgboost import XGBRegressor
-
-from sklearn.metrics import (
-    mean_absolute_error,
-    mean_squared_error,
-    r2_score,
-    median_absolute_error,
-    max_error,
-    explained_variance_score
-)
-
+import shap
+import matplotlib.pyplot as plt
 import numpy as np
 import pandas as pd
 
 
 ⸻
 
-2) Small check before training (important)
-
-This helps avoid training errors.
+12.2 Build SHAP explainer on your trained baseline model
 
 # ==============================
-# 2) Final checks before training
+# 12.2) Build SHAP explainer
 # ==============================
-print("X_train_encoded shape:", X_train_encoded.shape)
-print("X_test_encoded shape :", X_test_encoded.shape)
-print("y_train shape:", y_train.shape)
-print("y_test shape :", y_test.shape)
+# xgb_reg is your trained baseline model
+explainer = shap.TreeExplainer(xgb_reg)
 
-print("\nX_train dtypes (unique):")
-print(X_train_encoded.dtypes.unique())
-
-print("\nAny missing in target?")
-print("y_train missing:", y_train.isna().sum())
-print("y_test missing :", y_test.isna().sum())
-
-print("\nAny non-numeric columns left in X_train?")
-print(X_train_encoded.select_dtypes(exclude=[np.number]).columns.tolist())
+print("SHAP explainer created ✅")
 
 
 ⸻
 
-3) What we did so far (small list — as you asked)
+12.3 SHAP values on a sample of train data (faster + enough for global importance)
 
 # ==============================
-# 3) Small summary of what was done before training
+# 12.3) Compute SHAP values on train sample
 # ==============================
-print("""
-What we did before training:
-1) Cleaned data and converted selected business 0 values to np.nan
-2) Split data into X (features) and y (target = evaluate_note)
-3) Split train/test BEFORE encoding (to avoid leakage)
-4) Applied selected encodings:
-   - One-Hot Encoding (chosen columns)
-   - Frequency/Count Encoding (chosen columns)
-   - Target Encoding (optional, if selected)
-5) Added optional log1p transforms for selected numeric columns
-6) Converted all final features to numeric float (XGBoost-ready)
-7) Cleaned feature names (important for XGBoost)
-""")
+sample_n = 500 if len(X_train_encoded) > 500 else len(X_train_encoded)
+
+X_shap_sample = X_train_encoded.sample(sample_n, random_state=42).copy()
+
+# Make sure columns are strings (safe)
+X_shap_sample.columns = X_shap_sample.columns.astype(str)
+
+shap_values_sample = explainer.shap_values(X_shap_sample)
+
+print("X_shap_sample shape:", X_shap_sample.shape)
+print("SHAP values shape:", np.array(shap_values_sample).shape)
+print("SHAP values computed ✅")
 
 
 ⸻
 
-4) Baseline XGBoost Regressor (normal training, no target weighting)
-
-This is your first reference model.
+12.4 SHAP summary plot (best global feature importance view)
 
 # ==============================
-# 4) Baseline XGBoost Regressor (normal training)
+# 12.4) SHAP summary plot (global importance)
 # ==============================
-xgb_reg = XGBRegressor(
-    # Regression objective
-    objective="reg:squarederror",
-    eval_metric="rmse",
+shap.summary_plot(shap_values_sample, X_shap_sample, show=True)
 
-    # Main hyperparameters (good baseline)
-    n_estimators=500,
-    learning_rate=0.03,
-    max_depth=6,
-    min_child_weight=3,
-    gamma=0.0,
+How to read it (quick)
+	•	Top rows = most important features globally
+	•	Right (positive SHAP) = pushes prediction higher
+	•	Left (negative SHAP) = pushes prediction lower
+	•	Red = high feature value, Blue = low feature value
 
-    subsample=0.8,
-    colsample_bytree=0.8,
-    colsample_bylevel=1.0,
-    colsample_bynode=1.0,
+⸻
 
-    reg_alpha=0.0,
-    reg_lambda=1.0,
+12.5 SHAP bar plot (simple ranked feature importance)
 
-    tree_method="hist",
-    grow_policy="depthwise",
-    max_leaves=0,
+# ==============================
+# 12.5) SHAP bar plot (mean |SHAP|)
+# ==============================
+shap.summary_plot(shap_values_sample, X_shap_sample, plot_type="bar", show=True)
 
-    # Missing values handling (XGBoost will handle np.nan)
-    missing=np.nan,
+This gives a simple ranking like feature importance, but based on SHAP (usually better than raw tree importance).
 
-    # Performance / reproducibility
-    n_jobs=-1,
-    random_state=42,
-    verbosity=0
-)
+⸻
+
+12.6 SHAP feature importance table (top features in dataframe)
+
+# ==============================
+# 12.6) SHAP importance table (dataframe)
+# ==============================
+shap_importance_df = pd.DataFrame({
+    "feature": X_shap_sample.columns.astype(str),
+    "mean_abs_shap": np.abs(shap_values_sample).mean(axis=0)
+}).sort_values("mean_abs_shap", ascending=False).reset_index(drop=True)
+
+print("Top 20 features by SHAP importance:")
+display(shap_importance_df.head(20))
 
 
 ⸻
 
-5) Train the model
+13) Predict your new_rows example with the trained model
+
+Since you already said your new_rows block works, I’ll give you the prediction block + SHAP explanation for that example.
+
+This assumes you already transformed it into X_new_encoded using the same encoding steps and aligned columns to X_train_encoded.columns.
+
+⸻
+
+13.1 Final checks + predict new example
 
 # ==============================
-# 5) Train baseline model
+# 13.1) Predict on new example row(s)
 # ==============================
-xgb_reg.fit(X_train_encoded, y_train)
+print("X_new_encoded shape:", X_new_encoded.shape)
+print("Expected train shape (#features):", X_train_encoded.shape[1])
 
-print("Baseline XGBoost model trained successfully ✅")
+# Ensure exact same columns/order as train (important)
+X_new_encoded = X_new_encoded.reindex(columns=X_train_encoded.columns, fill_value=0).copy()
+
+# Predict
+new_pred = xgb_reg.predict(X_new_encoded)
+
+# Optional: clip to business range (0..10) if your target is evaluate_note
+new_pred_clipped = np.clip(new_pred, 0, 10)
+
+print("Raw prediction(s):", new_pred)
+print("Clipped prediction(s) [0,10]:", new_pred_clipped)
 
 
 ⸻
 
-6) Predict on train and test
+13.2 Show prediction nicely beside your input row
 
 # ==============================
-# 6) Predictions
+# 13.2) Display input + prediction together
 # ==============================
-pred_train = xgb_reg.predict(X_train_encoded)
-pred_test = xgb_reg.predict(X_test_encoded)
+new_rows_preview = pd.DataFrame(new_rows).copy()
 
-# Optional: clip predictions to your business range (0..10)
-pred_train_clipped = np.clip(pred_train, 0, 10)
-pred_test_clipped = np.clip(pred_test, 0, 10)
+new_rows_preview["predicted_evaluate_note_raw"] = new_pred
+new_rows_preview["predicted_evaluate_note_clipped_0_10"] = new_pred_clipped
 
-print("Prediction done ✅")
-print("Train predictions sample:", pred_train_clipped[:10])
-print("Test predictions sample :", pred_test_clipped[:10])
+display(new_rows_preview)
 
 
 ⸻
 
-7) Evaluate with many regression metrics (baseline)
+14) SHAP explanation for your new example (why this prediction?)
+
+This explains which features pushed the prediction up/down for that specific row.
+
+14.1 Compute SHAP values for X_new_encoded
 
 # ==============================
-# 7) Evaluation metrics (baseline)
+# 14.1) SHAP for the new example row(s)
 # ==============================
-# --- Train metrics
-mae_train = mean_absolute_error(y_train, pred_train_clipped)
-mse_train = mean_squared_error(y_train, pred_train_clipped)
-rmse_train = np.sqrt(mse_train)
-r2_train = r2_score(y_train, pred_train_clipped)
-medae_train = median_absolute_error(y_train, pred_train_clipped)
-maxerr_train = max_error(y_train, pred_train_clipped)
-evs_train = explained_variance_score(y_train, pred_train_clipped)
+shap_values_new = explainer.shap_values(X_new_encoded)
 
-# --- Test metrics
-mae_test = mean_absolute_error(y_test, pred_test_clipped)
-mse_test = mean_squared_error(y_test, pred_test_clipped)
-rmse_test = np.sqrt(mse_test)
-r2_test = r2_score(y_test, pred_test_clipped)
-medae_test = median_absolute_error(y_test, pred_test_clipped)
-maxerr_test = max_error(y_test, pred_test_clipped)
-evs_test = explained_variance_score(y_test, pred_test_clipped)
-
-# Safe percentage metrics (optional)
-eps = 1e-8
-mape_test = np.mean(np.abs((y_test - pred_test_clipped) / np.maximum(np.abs(y_test), eps))) * 100
-smape_test = np.mean(
-    2.0 * np.abs(pred_test_clipped - y_test) / np.maximum(np.abs(y_test) + np.abs(pred_test_clipped), eps)
-) * 100
+print("Prediction (raw):", float(new_pred[0]))
+print("Prediction (clipped):", float(new_pred_clipped[0]))
+print("SHAP values for new row computed ✅")
 
 
 ⸻
 
-8) Print results clearly (train vs test)
+14.2 SHAP contributions table for the first new row (best guaranteed output)
 
 # ==============================
-# 8) Print baseline results clearly
+# 14.2) SHAP contribution table for first new row
 # ==============================
-baseline_metrics = pd.DataFrame({
-    "Metric": [
-        "MAE", "MSE", "RMSE", "R2", "MedianAE", "MaxError", "ExplainedVariance", "MAPE_%", "sMAPE_%"
-    ],
-    "Train": [
-        mae_train, mse_train, rmse_train, r2_train, medae_train, maxerr_train, evs_train, np.nan, np.nan
-    ],
-    "Test": [
-        mae_test, mse_test, rmse_test, r2_test, medae_test, maxerr_test, evs_test, mape_test, smape_test
-    ],
-    "Better if": [
-        "Lower", "Lower", "Lower", "Higher", "Lower", "Lower", "Higher", "Lower", "Lower"
-    ]
+shap_new_df = pd.DataFrame({
+    "feature": X_new_encoded.columns.astype(str),
+    "feature_value": X_new_encoded.iloc[0].values,
+    "shap_value": shap_values_new[0]
 })
 
-print("\n=== Baseline XGBoost Regressor Results ===")
-display(baseline_metrics)
+shap_new_df["abs_shap"] = shap_new_df["shap_value"].abs()
+
+# Sort by strongest effect
+shap_new_df = shap_new_df.sort_values("abs_shap", ascending=False).reset_index(drop=True)
+
+print("Top 20 feature contributions for this prediction:")
+display(shap_new_df.head(20))
+
+How to read this table
+	•	shap_value > 0 → feature pushes prediction up
+	•	shap_value < 0 → feature pushes prediction down
+	•	larger abs_shap → stronger impact
+
+⸻
+
+14.3 Waterfall plot for your example (visual explanation)
+
+# ==============================
+# 14.3) SHAP waterfall plot (single row explanation)
+# ==============================
+# Some SHAP versions differ; this block tries the modern plot first
+try:
+    base_value = explainer.expected_value
+    if isinstance(base_value, (list, np.ndarray)):
+        base_value = base_value[0]
+
+    single_explanation = shap.Explanation(
+        values=shap_values_new[0],
+        base_values=base_value,
+        data=X_new_encoded.iloc[0].values,
+        feature_names=X_new_encoded.columns.astype(str).tolist()
+    )
+
+    shap.plots.waterfall(single_explanation, max_display=20)
+
+except Exception as e:
+    print("Waterfall plot not available in this SHAP version:", e)
+    print("Use the contribution table above (14.2), it gives the same logic.")
 
 
 ⸻
 
-9) Quick interpretation helper (simple)
+15) (Optional) Compare XGBoost built-in importance vs SHAP importance
+
+This helps you see the difference between model split importance and actual prediction contribution importance.
 
 # ==============================
-# 9) Quick interpretation (simple)
+# 15) Compare built-in importance vs SHAP importance
 # ==============================
-print("How to read quickly:")
-print("- MAE / RMSE lower = better")
-print("- R2 higher = better (1.0 best, 0 means mean baseline, <0 bad)")
-print("- Compare Train vs Test:")
-print("   * Train much better than Test => possible overfitting")
-print("   * Train and Test close => better generalization")
-
-
-⸻
-
-10) Show top feature importance (baseline)
-
-# ==============================
-# 10) Feature importance (baseline)
-# ==============================
-feature_importance_df = pd.DataFrame({
+xgb_importance_df = pd.DataFrame({
     "feature": X_train_encoded.columns.astype(str),
-    "importance": xgb_reg.feature_importances_
-}).sort_values("importance", ascending=False).reset_index(drop=True)
+    "xgb_importance": xgb_reg.feature_importances_
+}).sort_values("xgb_importance", ascending=False)
 
-print("\nTop 20 important features:")
-display(feature_importance_df.head(20))
+compare_importance_df = (
+    xgb_importance_df.merge(shap_importance_df, on="feature", how="outer")
+    .fillna(0)
+    .sort_values("mean_abs_shap", ascending=False)
+    .reset_index(drop=True)
+)
 
-
-⸻
-
-11) Save baseline model + predictions (optional but useful)
-
-# ==============================
-# 11) Save baseline outputs (optional)
-# ==============================
-baseline_xgb_model = xgb_reg
-
-baseline_pred_train = pred_train_clipped
-baseline_pred_test = pred_test_clipped
-
-print("Saved:")
-print("- baseline_xgb_model")
-print("- baseline_pred_train")
-print("- baseline_pred_test")
-print("- baseline_metrics")
-print("- feature_importance_df")
+print("Top features by SHAP (with XGBoost built-in importance side by side):")
+display(compare_importance_df.head(20))
 
 
 ⸻
 
-What’s next (recommended)
+16) Quick notes (important for your workflow)
+	•	XGBoost feature_importances_ = how often/usefully features split trees
+	•	SHAP = how much features actually contribute to predictions
+➡️ For explanation, SHAP is better
+	•	For predicting new_rows, always keep:
+	•	same encodings
+	•	same one-hot fitted encoder (ohe)
+	•	same frequency/target maps
+	•	same column cleaning
+	•	same column order as X_train_encoded
 
-Next step should be exactly what you asked before:
+⸻
 
-2) Baseline XGBoost with target imbalance handling (sample weights for regression)
-So you compare:
-	•	Normal baseline
-	•	Weighted baseline (imbalanced target-aware)
-
-Then after that:
-	•	Random Search (small, efficient)
-	•	Small Grid Search (focused hyperparameters only)
-
-If you want, I can write the weighted training block next (no functions) in the same style.
-
+If you want next, I can give you the weighted baseline (imbalanced regression target) block in the same style (no functions), then a small Random Search block (fast and practical).
 ```
