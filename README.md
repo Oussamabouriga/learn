@@ -1,508 +1,280 @@
 ```
+Excellent — let’s do Step 1 now: Baseline XGBoost Regressor (normal training) using your current variables:
+	•	X_train_encoded
+	•	X_test_encoded
+	•	y_train
+	•	y_test
 
-Perfect — let’s restart cleanly from the beginning and do it correctly (no functions, only code blocks), using your columns and your idea:
-	•	convert selected 0 values to real np.nan
-	•	split target / features
-	•	force some columns as categorical (like code_postal)
-	•	train/test split
-	•	apply One-Hot on selected columns
-	•	apply Frequency/Count Encoding on selected columns
-	•	(optional) apply Target Encoding on selected columns (you currently set it to [])
-	•	apply log transform on selected numeric columns you choose
-	•	make final encoded datasets ready for XGBoost
+No functions, clean blocks, and simple explanations.
 
 ⸻
 
-1) Imports (start here)
+1) Import what we need for training + evaluation
 
 # ==============================
-# 1) Imports
+# 1) Imports for XGBoost training + evaluation
 # ==============================
+from xgboost import XGBRegressor
+
+from sklearn.metrics import (
+    mean_absolute_error,
+    mean_squared_error,
+    r2_score,
+    median_absolute_error,
+    max_error,
+    explained_variance_score
+)
+
 import numpy as np
 import pandas as pd
 
-from sklearn.model_selection import train_test_split
-from sklearn.preprocessing import OneHotEncoder
+
+⸻
+
+2) Small check before training (important)
+
+This helps avoid training errors.
+
+# ==============================
+# 2) Final checks before training
+# ==============================
+print("X_train_encoded shape:", X_train_encoded.shape)
+print("X_test_encoded shape :", X_test_encoded.shape)
+print("y_train shape:", y_train.shape)
+print("y_test shape :", y_test.shape)
+
+print("\nX_train dtypes (unique):")
+print(X_train_encoded.dtypes.unique())
+
+print("\nAny missing in target?")
+print("y_train missing:", y_train.isna().sum())
+print("y_test missing :", y_test.isna().sum())
+
+print("\nAny non-numeric columns left in X_train?")
+print(X_train_encoded.select_dtypes(exclude=[np.number]).columns.tolist())
 
 
 ⸻
 
-2) Define what you want to encode / transform (your setup)
+3) What we did so far (small list — as you asked)
 
 # ==============================
-# 2) Your configuration (EDIT here)
+# 3) Small summary of what was done before training
 # ==============================
-
-# Target
-target_col = "evaluate_note"
-
-# Categorical encoding choices
-onehot_cols = ['PARCOURS_FINAL', 'PARCOURS_INITIAL', 'operating_system']
-target_encode_cols = []   # keep empty for now (you can add later)
-freq_encode_cols = ['marque', 'model', 'garantie', 'list_prest']
-
-# Columns to force as categorical even if they look numeric
-force_categorical_cols = ['code_postal']
-
-# Columns where 0 means "missing" (replace 0 -> np.nan)
-zero_to_nan_cols = [
-    'Nombre_sisnistre_refuse_client',
-    'delai_de_completude',
-    'delai_reparation',
-    'delai_indemnisation',
-    # add more if in your business logic 0 = no value / not applicable
-]
-
-# Numeric columns to apply log transform on (only positive-skewed variables)
-# IMPORTANT: use columns where log makes sense (delays, amounts, counts...)
-log_transform_cols = [
-    'delai_declaration',
-    'delai_de_completude',
-    'delai_decision',
-    'delai_reparation',
-    'delai_indemnisation',
-    'montant_indem',
-    'delai_Sinistre'
-]
-
-# Split config
-test_size = 0.2
-random_state = 42
+print("""
+What we did before training:
+1) Cleaned data and converted selected business 0 values to np.nan
+2) Split data into X (features) and y (target = evaluate_note)
+3) Split train/test BEFORE encoding (to avoid leakage)
+4) Applied selected encodings:
+   - One-Hot Encoding (chosen columns)
+   - Frequency/Count Encoding (chosen columns)
+   - Target Encoding (optional, if selected)
+5) Added optional log1p transforms for selected numeric columns
+6) Converted all final features to numeric float (XGBoost-ready)
+7) Cleaned feature names (important for XGBoost)
+""")
 
 
 ⸻
 
-3) Copy data + basic cleaning + convert selected 0 to np.nan
+4) Baseline XGBoost Regressor (normal training, no target weighting)
+
+This is your first reference model.
 
 # ==============================
-# 3) Copy dataframe + basic cleaning
+# 4) Baseline XGBoost Regressor (normal training)
 # ==============================
-df_work = df.copy()
+xgb_reg = XGBRegressor(
+    # Regression objective
+    objective="reg:squarederror",
+    eval_metric="rmse",
 
-# Optional: strip spaces from column names (safe)
-df_work.columns = df_work.columns.astype(str).str.strip()
+    # Main hyperparameters (good baseline)
+    n_estimators=500,
+    learning_rate=0.03,
+    max_depth=6,
+    min_child_weight=3,
+    gamma=0.0,
 
-# Make sure target exists
-if target_col not in df_work.columns:
-    raise ValueError(f"Target column '{target_col}' not found in df")
+    subsample=0.8,
+    colsample_bytree=0.8,
+    colsample_bylevel=1.0,
+    colsample_bynode=1.0,
 
-# ==============================
-# 3.1) Convert selected 0 values to np.nan (REAL NaN)
-# ==============================
-for col in zero_to_nan_cols:
-    if col in df_work.columns:
-        # Convert to numeric first (invalid strings -> NaN)
-        df_work[col] = pd.to_numeric(df_work[col], errors="coerce")
-        # Replace business-zero with real numpy NaN
-        df_work[col] = df_work[col].replace(0, np.nan)
+    reg_alpha=0.0,
+    reg_lambda=1.0,
 
-# Quick check
-print("Zero->NaN conversion done. Missing counts in selected columns:")
-for col in zero_to_nan_cols:
-    if col in df_work.columns:
-        print(col, ":", df_work[col].isna().sum())
+    tree_method="hist",
+    grow_policy="depthwise",
+    max_leaves=0,
 
+    # Missing values handling (XGBoost will handle np.nan)
+    missing=np.nan,
 
-⸻
-
-4) Force some columns to categorical + split X / y
-
-# ==============================
-# 4) Force selected columns as categorical (string)
-# ==============================
-for col in force_categorical_cols:
-    if col in df_work.columns:
-        df_work[col] = df_work[col].astype("string")
-
-# Also make sure chosen categorical encoding columns are treated as string
-for col in (onehot_cols + target_encode_cols + freq_encode_cols):
-    if col in df_work.columns:
-        df_work[col] = df_work[col].astype("string")
-
-# ==============================
-# 4.1) Split X and y
-# ==============================
-X = df_work.drop(columns=[target_col]).copy()
-y = pd.to_numeric(df_work[target_col], errors="coerce").copy()
-
-# Drop rows where target is missing
-mask_target_ok = y.notna()
-X = X.loc[mask_target_ok].copy()
-y = y.loc[mask_target_ok].astype(float).copy()
-
-print("X shape:", X.shape)
-print("y shape:", y.shape)
-print("Target missing removed:", (~mask_target_ok).sum())
-
-
-⸻
-
-5) Train/Test split (before encoding to avoid leakage)
-
-# ==============================
-# 5) Train / Test split (BEFORE encoding)
-# ==============================
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
-    test_size=test_size,
-    random_state=random_state
+    # Performance / reproducibility
+    n_jobs=-1,
+    random_state=42,
+    verbosity=0
 )
 
-print("Train shape:", X_train.shape, y_train.shape)
-print("Test shape :", X_test.shape, y_test.shape)
+
+⸻
+
+5) Train the model
+
+# ==============================
+# 5) Train baseline model
+# ==============================
+xgb_reg.fit(X_train_encoded, y_train)
+
+print("Baseline XGBoost model trained successfully ✅")
 
 
 ⸻
 
-6) Frequency / Count Encoding (fit on train only, apply to train/test)
-
-Explanation (simple)
-
-Frequency encoding replaces each category by how often it appears in the training data.
-
-Example:
-	•	marque = "Samsung" appears 1200 times → encoded as 1200
-	•	marque = "Apple" appears 300 times → encoded as 300
-
-Why useful:
-	•	good for high-cardinality columns (many categories)
-	•	keeps feature count small (unlike one-hot explosion)
-
-⸻
-
+6) Predict on train and test
 
 # ==============================
-# 6) Frequency / Count Encoding (fit on TRAIN only)
+# 6) Predictions
 # ==============================
-X_train_enc = X_train.copy()
-X_test_enc = X_test.copy()
+pred_train = xgb_reg.predict(X_train_encoded)
+pred_test = xgb_reg.predict(X_test_encoded)
 
-encoding_artifacts = {
-    "onehot_columns_created": [],
-    "target_encoding_maps": {},
-    "target_encoding_global_mean": None,
-    "frequency_encoding_maps": {}
-}
+# Optional: clip predictions to your business range (0..10)
+pred_train_clipped = np.clip(pred_train, 0, 10)
+pred_test_clipped = np.clip(pred_test, 0, 10)
 
-for col in freq_encode_cols:
-    if col in X_train_enc.columns:
-        # Use string category values (including missing as text label)
-        train_col_str = X_train_enc[col].astype("string").fillna("__MISSING__")
-        test_col_str  = X_test_enc[col].astype("string").fillna("__MISSING__")
-
-        # Count encoding map (you can switch to normalized freq if you want)
-        freq_map = train_col_str.value_counts(dropna=False).to_dict()
-
-        # Save map for future prediction on new data
-        encoding_artifacts["frequency_encoding_maps"][col] = freq_map
-
-        # Apply map
-        X_train_enc[col] = train_col_str.map(freq_map).astype(float)
-        X_test_enc[col]  = test_col_str.map(freq_map).fillna(0).astype(float)  # unseen categories -> 0
-
-print("Frequency encoding done for:", list(encoding_artifacts["frequency_encoding_maps"].keys()))
+print("Prediction done ✅")
+print("Train predictions sample:", pred_train_clipped[:10])
+print("Test predictions sample :", pred_test_clipped[:10])
 
 
 ⸻
 
-7) Target Encoding (optional — fit on train only)
-
-You currently set target_encode_cols = [], so this block will just skip.
+7) Evaluate with many regression metrics (baseline)
 
 # ==============================
-# 7) Target Encoding (optional, fit on TRAIN only)
+# 7) Evaluation metrics (baseline)
 # ==============================
-# Target encoding = replace each category with mean(target) in train
-# Important: fit on TRAIN only to avoid leakage
+# --- Train metrics
+mae_train = mean_absolute_error(y_train, pred_train_clipped)
+mse_train = mean_squared_error(y_train, pred_train_clipped)
+rmse_train = np.sqrt(mse_train)
+r2_train = r2_score(y_train, pred_train_clipped)
+medae_train = median_absolute_error(y_train, pred_train_clipped)
+maxerr_train = max_error(y_train, pred_train_clipped)
+evs_train = explained_variance_score(y_train, pred_train_clipped)
 
-global_target_mean = float(y_train.mean())
-encoding_artifacts["target_encoding_global_mean"] = global_target_mean
+# --- Test metrics
+mae_test = mean_absolute_error(y_test, pred_test_clipped)
+mse_test = mean_squared_error(y_test, pred_test_clipped)
+rmse_test = np.sqrt(mse_test)
+r2_test = r2_score(y_test, pred_test_clipped)
+medae_test = median_absolute_error(y_test, pred_test_clipped)
+maxerr_test = max_error(y_test, pred_test_clipped)
+evs_test = explained_variance_score(y_test, pred_test_clipped)
 
-for col in target_encode_cols:
-    if col in X_train_enc.columns:
-        train_col_str = X_train_enc[col].astype("string").fillna("__MISSING__")
-        test_col_str  = X_test_enc[col].astype("string").fillna("__MISSING__")
-
-        te_map = pd.DataFrame({
-            "cat": train_col_str,
-            "target": y_train.values
-        }).groupby("cat")["target"].mean().to_dict()
-
-        encoding_artifacts["target_encoding_maps"][col] = te_map
-
-        X_train_enc[col] = train_col_str.map(te_map).fillna(global_target_mean).astype(float)
-        X_test_enc[col]  = test_col_str.map(te_map).fillna(global_target_mean).astype(float)
-
-print("Target encoding done for:", list(encoding_artifacts["target_encoding_maps"].keys()))
+# Safe percentage metrics (optional)
+eps = 1e-8
+mape_test = np.mean(np.abs((y_test - pred_test_clipped) / np.maximum(np.abs(y_test), eps))) * 100
+smape_test = np.mean(
+    2.0 * np.abs(pred_test_clipped - y_test) / np.maximum(np.abs(y_test) + np.abs(pred_test_clipped), eps)
+) * 100
 
 
 ⸻
 
-8) One-Hot Encoding (fit on train only, apply to test)
+8) Print results clearly (train vs test)
 
 # ==============================
-# 8) One-Hot Encoding (fit on TRAIN only)
+# 8) Print baseline results clearly
 # ==============================
-# We'll one-hot only the columns you selected in onehot_cols
+baseline_metrics = pd.DataFrame({
+    "Metric": [
+        "MAE", "MSE", "RMSE", "R2", "MedianAE", "MaxError", "ExplainedVariance", "MAPE_%", "sMAPE_%"
+    ],
+    "Train": [
+        mae_train, mse_train, rmse_train, r2_train, medae_train, maxerr_train, evs_train, np.nan, np.nan
+    ],
+    "Test": [
+        mae_test, mse_test, rmse_test, r2_test, medae_test, maxerr_test, evs_test, mape_test, smape_test
+    ],
+    "Better if": [
+        "Lower", "Lower", "Lower", "Higher", "Lower", "Lower", "Higher", "Lower", "Lower"
+    ]
+})
 
-onehot_cols_existing = [c for c in onehot_cols if c in X_train_enc.columns]
-print("OneHot columns found:", onehot_cols_existing)
-
-if len(onehot_cols_existing) > 0:
-    # Prepare as string + explicit missing token
-    X_train_ohe_input = X_train_enc[onehot_cols_existing].astype("string").fillna("__MISSING__")
-    X_test_ohe_input  = X_test_enc[onehot_cols_existing].astype("string").fillna("__MISSING__")
-
-    # sklearn compatibility across versions
-    try:
-        ohe = OneHotEncoder(handle_unknown="ignore", sparse_output=False)
-    except TypeError:
-        ohe = OneHotEncoder(handle_unknown="ignore", sparse=False)
-
-    X_train_ohe = ohe.fit_transform(X_train_ohe_input)
-    X_test_ohe  = ohe.transform(X_test_ohe_input)
-
-    # Get generated column names
-    ohe_feature_names = ohe.get_feature_names_out(onehot_cols_existing).tolist()
-
-    # Make DataFrames with same index
-    X_train_ohe_df = pd.DataFrame(X_train_ohe, columns=ohe_feature_names, index=X_train_enc.index)
-    X_test_ohe_df  = pd.DataFrame(X_test_ohe, columns=ohe_feature_names, index=X_test_enc.index)
-
-    # Drop original one-hot columns, then concat encoded columns
-    X_train_enc = X_train_enc.drop(columns=onehot_cols_existing)
-    X_test_enc  = X_test_enc.drop(columns=onehot_cols_existing)
-
-    X_train_enc = pd.concat([X_train_enc, X_train_ohe_df], axis=1)
-    X_test_enc  = pd.concat([X_test_enc, X_test_ohe_df], axis=1)
-
-    encoding_artifacts["onehot_columns_created"] = ohe_feature_names
-else:
-    print("No one-hot columns to encode.")
+print("\n=== Baseline XGBoost Regressor Results ===")
+display(baseline_metrics)
 
 
 ⸻
 
-9) Log transform selected numeric columns (safe way)
-
-Why log transform?
-
-Useful for skewed variables like:
-	•	delays
-	•	amounts
-	•	counts
-
-It compresses very large values and helps the model learn patterns better.
-
-We use np.log1p(x) = log(1 + x) because it handles zero safely.
+9) Quick interpretation helper (simple)
 
 # ==============================
-# 9) Log transform selected numerical columns (safe)
+# 9) Quick interpretation (simple)
 # ==============================
-log_cols_existing = [c for c in log_transform_cols if c in X_train_enc.columns]
-print("Log-transform columns found:", log_cols_existing)
-
-for col in log_cols_existing:
-    # Force numeric (invalid values -> NaN)
-    X_train_enc[col] = pd.to_numeric(X_train_enc[col], errors="coerce")
-    X_test_enc[col]  = pd.to_numeric(X_test_enc[col], errors="coerce")
-
-    # If negatives exist, skip log OR clip depending on business meaning
-    train_has_negative = (X_train_enc[col].dropna() < 0).any()
-    test_has_negative  = (X_test_enc[col].dropna() < 0).any()
-
-    if train_has_negative or test_has_negative:
-        print(f"Skipping log for '{col}' (contains negative values)")
-        continue
-
-    # Create NEW columns (recommended, keeps original too)
-    X_train_enc[f"{col}__log1p"] = np.log1p(X_train_enc[col])
-    X_test_enc[f"{col}__log1p"]  = np.log1p(X_test_enc[col])
-
-print("Log transform done.")
+print("How to read quickly:")
+print("- MAE / RMSE lower = better")
+print("- R2 higher = better (1.0 best, 0 means mean baseline, <0 bad)")
+print("- Compare Train vs Test:")
+print("   * Train much better than Test => possible overfitting")
+print("   * Train and Test close => better generalization")
 
 
 ⸻
 
-10) Convert remaining object/string columns (if any)
-
-At this point, XGBoost needs numeric values.
-If any categorical columns remain (not encoded), we either encode them or drop them.
-
-This block helps you detect them.
+10) Show top feature importance (baseline)
 
 # ==============================
-# 10) Check remaining non-numeric columns
+# 10) Feature importance (baseline)
 # ==============================
-remaining_non_numeric_train = X_train_enc.select_dtypes(exclude=[np.number, "bool"]).columns.tolist()
-remaining_non_numeric_test  = X_test_enc.select_dtypes(exclude=[np.number, "bool"]).columns.tolist()
+feature_importance_df = pd.DataFrame({
+    "feature": X_train_encoded.columns.astype(str),
+    "importance": xgb_reg.feature_importances_
+}).sort_values("importance", ascending=False).reset_index(drop=True)
 
-print("Remaining non-numeric columns in TRAIN:", remaining_non_numeric_train)
-print("Remaining non-numeric columns in TEST :", remaining_non_numeric_test)
-
-If you still have columns there, it means:
-	•	they were not included in onehot / target / frequency encoding
-	•	and they are still strings
-
-You can either:
-	•	add them to one of your encoding lists, or
-	•	drop them now (temporary)
-
-⸻
-
-11) Final numeric conversion for XGBoost (and keep np.nan)
-
-# ==============================
-# 11) Final conversion to numeric (XGBoost-ready)
-# ==============================
-# Convert booleans to int (optional)
-bool_cols_train = X_train_enc.select_dtypes(include=["bool"]).columns.tolist()
-bool_cols_test = X_test_enc.select_dtypes(include=["bool"]).columns.tolist()
-
-if len(bool_cols_train) > 0:
-    X_train_enc[bool_cols_train] = X_train_enc[bool_cols_train].astype(int)
-if len(bool_cols_test) > 0:
-    X_test_enc[bool_cols_test] = X_test_enc[bool_cols_test].astype(int)
-
-# Convert every column to numeric (invalid -> NaN)
-for c in X_train_enc.columns:
-    X_train_enc[c] = pd.to_numeric(X_train_enc[c], errors="coerce")
-
-for c in X_test_enc.columns:
-    X_test_enc[c] = pd.to_numeric(X_test_enc[c], errors="coerce")
-
-# Cast to float (keeps NaN as np.nan)
-X_train_encoded = X_train_enc.astype(float).copy()
-X_test_encoded  = X_test_enc.astype(float).copy()
-
-# Target numeric
-y_train = pd.to_numeric(y_train, errors="coerce").astype(float)
-y_test  = pd.to_numeric(y_test, errors="coerce").astype(float)
-
-# Drop rows where target is missing (if any)
-train_mask = y_train.notna()
-test_mask  = y_test.notna()
-
-X_train_encoded = X_train_encoded.loc[train_mask].copy()
-y_train = y_train.loc[train_mask].copy()
-
-X_test_encoded = X_test_encoded.loc[test_mask].copy()
-y_test = y_test.loc[test_mask].copy()
-
-print("Final encoded train shape:", X_train_encoded.shape)
-print("Final encoded test shape :", X_test_encoded.shape)
-print("Target train shape:", y_train.shape)
-print("Target test shape :", y_test.shape)
+print("\nTop 20 important features:")
+display(feature_importance_df.head(20))
 
 
 ⸻
 
-12) Clean feature names for XGBoost (IMPORTANT — fixes your previous error)
-
-This is the fix for:
-
-feature_names must be string, and may not contain [, ] or <
+11) Save baseline model + predictions (optional but useful)
 
 # ==============================
-# 12) Clean feature names for XGBoost
+# 11) Save baseline outputs (optional)
 # ==============================
-X_train_encoded.columns = X_train_encoded.columns.astype(str)
-X_test_encoded.columns  = X_test_encoded.columns.astype(str)
+baseline_xgb_model = xgb_reg
 
-X_train_encoded.columns = (
-    X_train_encoded.columns
-    .str.replace("[", "(", regex=False)
-    .str.replace("]", ")", regex=False)
-    .str.replace("<", "lt_", regex=False)
-    .str.replace(">", "gt_", regex=False)
-    .str.replace(" ", "_", regex=False)
-)
+baseline_pred_train = pred_train_clipped
+baseline_pred_test = pred_test_clipped
 
-X_test_encoded.columns = (
-    X_test_encoded.columns
-    .str.replace("[", "(", regex=False)
-    .str.replace("]", ")", regex=False)
-    .str.replace("<", "lt_", regex=False)
-    .str.replace(">", "gt_", regex=False)
-    .str.replace(" ", "_", regex=False)
-)
-
-# Ensure same columns / order
-X_test_encoded = X_test_encoded.reindex(columns=X_train_encoded.columns, fill_value=0)
-
-# Handle duplicate names after cleaning (rare but possible)
-if X_train_encoded.columns.duplicated().any():
-    new_cols = []
-    counts = {}
-    for c in X_train_encoded.columns:
-        if c not in counts:
-            counts[c] = 0
-            new_cols.append(c)
-        else:
-            counts[c] += 1
-            new_cols.append(f"{c}__dup{counts[c]}")
-    X_train_encoded.columns = new_cols
-    X_test_encoded.columns = new_cols
-
-print("Bad feature names remaining:",
-      [c for c in X_train_encoded.columns if ("[" in c or "]" in c or "<" in c)][:10])
-print("All feature names ready for XGBoost ✅")
+print("Saved:")
+print("- baseline_xgb_model")
+print("- baseline_pred_train")
+print("- baseline_pred_test")
+print("- baseline_metrics")
+print("- feature_importance_df")
 
 
 ⸻
 
-13) Preview results (so you verify before training)
+What’s next (recommended)
 
-# ==============================
-# 13) Preview final transformed data
-# ==============================
-print("\nEncoded TRAIN sample:")
-display(X_train_encoded.head())
+Next step should be exactly what you asked before:
 
-print("\nEncoded TEST sample:")
-display(X_test_encoded.head())
+2) Baseline XGBoost with target imbalance handling (sample weights for regression)
+So you compare:
+	•	Normal baseline
+	•	Weighted baseline (imbalanced target-aware)
 
-print("\nEncoding artifacts keys:")
-print(encoding_artifacts.keys())
+Then after that:
+	•	Random Search (small, efficient)
+	•	Small Grid Search (focused hyperparameters only)
 
-print("\nTarget Encoding maps:", list(encoding_artifacts["target_encoding_maps"].keys()))
-print("Frequency Encoding maps:", list(encoding_artifacts["frequency_encoding_maps"].keys()))
-
-print("\nMissing values in X_train_encoded (top 20):")
-print(X_train_encoded.isna().sum().sort_values(ascending=False).head(20))
-
-
-⸻
-
-Other numerical transformation methods (what you asked)
-
-For numerical columns (besides log transform), here are good options:
-	•	No transform (often fine for XGBoost) ✅
-Tree models are less sensitive to scale than linear models.
-	•	log1p transform ✅
-Best for positive skewed data (amounts, delays, counts).
-	•	Robust scaling (median/IQR)
-Useful if you use linear models / neural nets. Less necessary for XGBoost.
-	•	Winsorization / clipping
-Cap extreme outliers (e.g., 99th percentile) if huge outliers distort behavior.
-	•	Yeo-Johnson / Box-Cox
-More advanced distribution transforms. Usually not first choice with XGBoost.
-
-Practical recommendation for your case (XGBoost + tabular)
-	•	Keep raw numeric columns
-	•	Add log1p versions for very skewed columns
-	•	Keep NaN as NaN (XGBoost can use missing values)
-	•	No need for StandardScaler for XGBoost
-
-⸻
-
-Important note about missing values (np.nan vs <NA>)
-
-You asked this before:
-	•	np.nan ✅ standard missing value (NumPy)
-	•	<NA> ✅ pandas missing representation (nullable dtype display)
-
-After final conversion to float, missing values become np.nan, which XGBoost handles.
-
+If you want, I can write the weighted training block next (no functions) in the same style.
 
 ```
