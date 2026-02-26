@@ -1,4 +1,3 @@
-```
 ## Data transformation methods (cheat sheet)
 
 | Method (English) | À quoi ça sert (mots simples) | Quand l’utiliser |
@@ -28,4 +27,3 @@
 
 **Phrase courte pour comparer les modèles :**  
 Pour une note 0–10, on compare surtout **MAE + RMSE + Accuracy@±1**, et on utilise **R²** comme indicateur global.
-```
