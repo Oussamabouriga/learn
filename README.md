@@ -1,30 +1,30 @@
 ```
-
-
 # ============================================================
-# CATBOOST — BAYESIAN OPTIMIZATION (Optuna, MULTI-OBJECTIVE)
-# Objectives (CV):
-#   - minimize MAE
-#   - minimize RMSE
-#   - maximize R2
-#   - maximize Accuracy@±tol
+# XGBOOST — BAYESIAN OPTIMIZATION (Optuna, MULTI-OBJECTIVE)
+# CV objectives (on training folds only):
+#   - minimize MAE_CV
+#   - minimize RMSE_CV
+#   - maximize R2_CV
+#   - maximize Accuracy@±tol_CV
 #
-# + Imbalanced regression sample weights
-# + K-Fold CV
-# + Select best trial from Pareto front (editable scoring)
-# + Train final best model
-# + Train/Test metrics
-# + Example prediction
-# + SHAP global + SHAP example
+# Then:
+#   - Train final model on FULL train (with sample weights)
+#   - Report Train + Test metrics:
+#       [mae_train, rmse_train, r2_train, acc_train]
+#       [mae_test,  rmse_test,  r2_test,  acc_test]
+#   - Predict example row (X_new_encoded) if available
+#   - SHAP global + example
+# ============================================================
+# Requirements:
+#   pip install optuna xgboost shap scikit-learn
 # ============================================================
 
 import numpy as np
 import pandas as pd
 
-from sklearn.model_selection import train_test_split, KFold
+from xgboost import XGBRegressor
+from sklearn.model_selection import KFold
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-
-from catboost import CatBoostRegressor, Pool
 
 import optuna
 import shap
@@ -34,37 +34,25 @@ import matplotlib.pyplot as plt
 # ==============================
 # 1) CONFIG (editable)
 # ==============================
-target_col = "evaluate_note"
-test_size = 0.2
 random_state = 42
 
-# Categorical columns (EXPLICIT)
-cat_cols = [
-    "PARCOURS_FINAL",
-    "PARCOURS_INITIAL",
-    "operating_system",
-    "marque",
-    "model",
-    "garantie",
-    "list_prest",
-    "code_postal",
-]
-cat_cols = [c for c in cat_cols if c in df.columns]
+# Business range (note 0..10)
+clip_min, clip_max = 0, 10
 
-# Accuracy tolerance (points)
+# Tolerance for regression accuracy
 tol = 1.0  # change to 0.5 if you want
 
-# Sample weights config for imbalance (train only)
-n_bins = 8
+# Sample-weight config (imbalanced regression)
+n_bins = 10
 clip_min_w, clip_max_w = 0.5, 5.0
 
-# CV + Optuna config
+# Optuna config
 n_splits = 5
-n_trials = 40  # increase if you want (60..120)
+n_trials = 50  # adjust 30..120 depending on budget
 
-# Choose ONE trial from Pareto front (editable weights)
-# Lower is better for MAE/RMSE; Higher is better for R2/Acc
-# We'll build a score to pick one final model:
+# How to pick ONE trial from Pareto front (editable weights)
+# Score lower is better:
+# score = w_mae*MAE + w_rmse*RMSE - w_r2*R2 - w_acc*(Acc/100)
 score_w_mae = 1.0
 score_w_rmse = 1.0
 score_w_r2 = 1.0
@@ -72,46 +60,27 @@ score_w_acc = 0.5
 
 
 # ==============================
-# 2) BUILD X / y (same clean rules)
+# 2) ASSUMPTIONS (you already have these)
 # ==============================
-feature_cols = [c for c in df.columns if c != target_col]
-X = df[feature_cols].copy()
-y = pd.to_numeric(df[target_col], errors="coerce")
+# X_train_encoded, X_test_encoded must be pandas DataFrames (recommended)
+# y_train, y_test must be pandas Series
+# X_new_encoded optional
 
-mask = y.notna()
-X = X.loc[mask].copy()
-y = y.loc[mask].astype(float).copy()
+# Safety cast
+X_train_encoded = X_train_encoded.copy().astype(float)
+X_test_encoded  = X_test_encoded.copy().astype(float)
+y_train = pd.to_numeric(y_train, errors="coerce").astype(float)
+y_test  = pd.to_numeric(y_test, errors="coerce").astype(float)
 
-# pd.NA -> np.nan
-X = X.replace({pd.NA: np.nan})
+if "X_new_encoded" in globals():
+    X_new_encoded = X_new_encoded.reindex(columns=X_train_encoded.columns, fill_value=0).astype(float)
 
-# Categorical: force to string + fill missing
-for c in cat_cols:
-    X[c] = X[c].astype("string").fillna("__MISSING__")
-
-# Numeric: force numeric
-num_cols = [c for c in X.columns if c not in cat_cols]
-for c in num_cols:
-    X[c] = pd.to_numeric(X[c], errors="coerce")
-
-print("X shape:", X.shape, "| y shape:", y.shape)
-print("Categorical cols:", cat_cols)
+print("Train:", X_train_encoded.shape, y_train.shape)
+print("Test :", X_test_encoded.shape, y_test.shape)
 
 
 # ==============================
-# 3) TRAIN/TEST SPLIT
-# ==============================
-X_train, X_test, y_train, y_test = train_test_split(
-    X, y,
-    test_size=test_size,
-    random_state=random_state
-)
-print("Train shape:", X_train.shape, y_train.shape)
-print("Test  shape:", X_test.shape, y_test.shape)
-
-
-# ==============================
-# 4) SAMPLE WEIGHTS (imbalanced regression) on y_train only
+# 3) SAMPLE WEIGHTS on y_train ONLY
 # ==============================
 try:
     y_bins = pd.qcut(y_train, q=min(n_bins, y_train.nunique()), duplicates="drop")
@@ -128,54 +97,57 @@ print(pd.Series(weights_train).describe())
 
 
 # ==============================
-# 5) MULTI-OBJECTIVE OPTUNA (KFold CV)
+# 4) KFold CV (used by Optuna)
 # ==============================
 cv = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
 
+
+# ==============================
+# 5) MULTI-OBJECTIVE OPTUNA (CV metrics)
+# ==============================
 def objective(trial):
     params = {
-        "loss_function": "RMSE",
-        "eval_metric": "RMSE",
-        "random_seed": random_state,
-        "verbose": False,
-        "allow_writing_files": False,
+        # fixed core params
+        "objective": "reg:squarederror",
+        "eval_metric": "rmse",
+        "tree_method": "hist",
+        "random_state": random_state,
+        "n_jobs": -1,
+        "verbosity": 0,
+        "missing": np.nan,
 
-        # Hyperparameters to tune (Bayesian)
-        "iterations": trial.suggest_int("iterations", 600, 2600),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
-        "depth": trial.suggest_int("depth", 4, 10),
-        "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 20.0, log=True),
+        # tuned params
+        "n_estimators": trial.suggest_int("n_estimators", 200, 1500),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
 
-        "random_strength": trial.suggest_float("random_strength", 0.0, 2.0),
-        "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 2.0),
+        "max_depth": trial.suggest_int("max_depth", 3, 10),
+        "min_child_weight": trial.suggest_float("min_child_weight", 1.0, 20.0, log=True),
+        "gamma": trial.suggest_float("gamma", 0.0, 2.0),
 
         "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bylevel": trial.suggest_float("colsample_bylevel", 0.6, 1.0),
+        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
 
-        "grow_policy": trial.suggest_categorical("grow_policy", ["SymmetricTree", "Lossguide"]),
+        "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 2.0),
+        "reg_lambda": trial.suggest_float("reg_lambda", 0.5, 10.0, log=True),
+
+        "max_delta_step": trial.suggest_int("max_delta_step", 0, 5),
     }
 
-    fold_mae = []
-    fold_rmse = []
-    fold_r2 = []
-    fold_acc = []
+    fold_mae, fold_rmse, fold_r2, fold_acc = [], [], [], []
 
-    for tr_idx, va_idx in cv.split(X_train):
-        X_tr = X_train.iloc[tr_idx].copy()
-        y_tr = y_train.iloc[tr_idx].copy()
+    for tr_idx, va_idx in cv.split(X_train_encoded):
+        X_tr = X_train_encoded.iloc[tr_idx]
+        y_tr = y_train.iloc[tr_idx]
         w_tr = weights_train[tr_idx]
 
-        X_va = X_train.iloc[va_idx].copy()
-        y_va = y_train.iloc[va_idx].copy()
+        X_va = X_train_encoded.iloc[va_idx]
+        y_va = y_train.iloc[va_idx]
 
-        train_pool = Pool(X_tr, y_tr, cat_features=cat_cols, weight=w_tr)
-        val_pool   = Pool(X_va, y_va, cat_features=cat_cols)
-
-        model = CatBoostRegressor(**params)
-        model.fit(train_pool, eval_set=val_pool, use_best_model=True, early_stopping_rounds=200)
+        model = XGBRegressor(**params)
+        model.fit(X_tr, y_tr, sample_weight=w_tr)
 
         pred_va = model.predict(X_va)
-        pred_va = np.clip(pred_va, 0, 10)
+        pred_va = np.clip(pred_va, clip_min, clip_max)
 
         mae = float(mean_absolute_error(y_va, pred_va))
         rmse = float(np.sqrt(mean_squared_error(y_va, pred_va)))
@@ -187,14 +159,12 @@ def objective(trial):
         fold_r2.append(r2)
         fold_acc.append(acc)
 
-    # CV average metrics
     mae_cv = float(np.mean(fold_mae))
     rmse_cv = float(np.mean(fold_rmse))
     r2_cv = float(np.mean(fold_r2))
     acc_cv = float(np.mean(fold_acc))
 
-    # Return 4 objectives:
-    # minimize mae_cv, minimize rmse_cv, maximize r2_cv, maximize acc_cv
+    # Return 4 objectives for Optuna
     return mae_cv, rmse_cv, r2_cv, acc_cv
 
 
@@ -202,17 +172,12 @@ study = optuna.create_study(directions=["minimize", "minimize", "maximize", "max
 study.optimize(objective, n_trials=n_trials)
 
 print("\n✅ Optuna multi-objective done")
-print("Number of Pareto-optimal trials:", len(study.best_trials))
+print("Pareto trials:", len(study.best_trials))
 
 
 # ==============================
-# 6) PICK ONE BEST TRIAL from Pareto front (editable scoring)
-#    Score: lower is better
+# 6) PICK ONE trial from Pareto front (editable scoring)
 # ==============================
-# We build a single scalar score to choose one model:
-# score = w_mae*MAE + w_rmse*RMSE - w_r2*R2 - w_acc*(Acc/100)
-# (Acc/100 to put it on 0..1 scale)
-
 best_trial = None
 best_score = float("inf")
 
@@ -229,147 +194,139 @@ for t in study.best_trials:
         best_trial = t
 
 print("\n✅ Selected trial from Pareto front")
-print("Best score:", best_score)
+print("Score:", best_score)
 print("CV metrics (MAE, RMSE, R2, Acc):", best_trial.values)
 print("Best params:", best_trial.params)
 
-best_bayes_params = best_trial.params
+best_params = best_trial.params
 
 
 # ==============================
-# 7) TRAIN FINAL MODEL on FULL TRAIN (with weights)
+# 7) TRAIN FINAL MODEL on FULL TRAIN (weighted)
 # ==============================
-train_pool_full = Pool(X_train, y_train, cat_features=cat_cols, weight=weights_train)
-test_pool       = Pool(X_test,  y_test,  cat_features=cat_cols)
+final_params = {
+    "objective": "reg:squarederror",
+    "eval_metric": "rmse",
+    "tree_method": "hist",
+    "random_state": random_state,
+    "n_jobs": -1,
+    "verbosity": 0,
+    "missing": np.nan,
+    **best_params
+}
 
-cat_model_bayes_best = CatBoostRegressor(
-    loss_function="RMSE",
-    eval_metric="RMSE",
-    random_seed=random_state,
-    verbose=200,
-    allow_writing_files=False,
-    **best_bayes_params
-)
+xgb_bayes_best = XGBRegressor(**final_params)
+xgb_bayes_best.fit(X_train_encoded, y_train, sample_weight=weights_train)
 
-cat_model_bayes_best.fit(
-    train_pool_full,
-    eval_set=test_pool,
-    use_best_model=True,
-    early_stopping_rounds=200
-)
-
-print("\n✅ Final Bayesian CatBoost trained")
+print("\n✅ Final Bayesian XGBoost trained")
 
 
 # ==============================
-# 8) METRICS TRAIN + TEST (all 4)
+# 8) REPORT TRAIN + TEST METRICS (what you asked)
 # ==============================
-pred_train_b = np.clip(cat_model_bayes_best.predict(X_train), 0, 10)
-pred_test_b  = np.clip(cat_model_bayes_best.predict(X_test),  0, 10)
+pred_train_b = np.clip(xgb_bayes_best.predict(X_train_encoded), clip_min, clip_max)
+pred_test_b  = np.clip(xgb_bayes_best.predict(X_test_encoded),  clip_min, clip_max)
 
-mae_train_b  = mean_absolute_error(y_train, pred_train_b)
+mae_train_b  = float(mean_absolute_error(y_train, pred_train_b))
 rmse_train_b = float(np.sqrt(mean_squared_error(y_train, pred_train_b)))
-r2_train_b   = r2_score(y_train, pred_train_b)
+r2_train_b   = float(r2_score(y_train, pred_train_b))
 acc_train_b  = float((np.abs(y_train.values - pred_train_b) <= tol).mean() * 100)
 
-mae_test_b   = mean_absolute_error(y_test, pred_test_b)
+mae_test_b   = float(mean_absolute_error(y_test, pred_test_b))
 rmse_test_b  = float(np.sqrt(mean_squared_error(y_test, pred_test_b)))
-r2_test_b    = r2_score(y_test, pred_test_b)
+r2_test_b    = float(r2_score(y_test, pred_test_b))
 acc_test_b   = float((np.abs(y_test.values - pred_test_b) <= tol).mean() * 100)
 
-metrics_bayes = pd.DataFrame({
+print("\n=== Train metrics ===")
+print([mae_train_b, rmse_train_b, r2_train_b, acc_train_b])
+
+print("\n=== Test metrics ===")
+print([mae_test_b, rmse_test_b, r2_test_b, acc_test_b])
+
+metrics_table = pd.DataFrame({
     "Metric": ["MAE", "RMSE", "R2", f"Accuracy@±{tol}"],
     "Train":  [mae_train_b, rmse_train_b, r2_train_b, acc_train_b],
     "Test":   [mae_test_b,  rmse_test_b,  r2_test_b,  acc_test_b],
     "Better if": ["Lower", "Lower", "Higher", "Higher"]
 })
-
-print("\n=== Final Bayesian Model Metrics ===")
-display(metrics_bayes)
+display(metrics_table)
 
 
 # ==============================
-# 9) PREDICT YOUR EXAMPLE ROW
+# 9) PREDICT EXAMPLE ROW (if available)
 # ==============================
-new_rows = [{
-    "PARCOURS_FINAL": "HORS_APPLE_EE",
-    "PARCOURS_INITIAL": "HORS_APPLE_EE",
-    "tarif": 19.99,
-    "Nombre_sisnitre_client": 1,
-    "Nombre_sisnitre_accepte_client": 1,
-    "Nombre_sisnitre_refuse_client": np.nan,
-    "Nombre_sisnitre_sans_suite_client": np.nan,
-    "code_postal": 59700,
-    "operating_system": "Android",
-    "marque": "Google",
-    "model": "Pixel 7 Pro ",
-    "ancienneté_de_contrat": 509555,
-    "garantie": "Dommage",
-    "Age": 43,
-    "dossier_complet": 1,
-    "decision_ai": 0,
-    "nombre_prestation_ko": 0,
-    "Nbr_ticket_pieces": 0,
-    "Nbr_ticket_information": 4,
-    "list_prest": "ADVANCED_SWAP",
-    "delai_declaration": 279000,
-    "delai_de_completude": np.nan,
-    "delai_decision": 13090,
-    "delai_reparation": 4,
-    "delai_indemnisation": 4,
-    "montant_indem": np.nan,
-    "delai_Sinistre": 602000,
-}]
-
-X_new = pd.DataFrame(new_rows)
-
-# add missing cols
-for c in X_train.columns:
-    if c not in X_new.columns:
-        X_new[c] = np.nan
-
-# align order
-X_new = X_new[X_train.columns].copy()
-
-# pd.NA -> np.nan
-X_new = X_new.replace({pd.NA: np.nan})
-
-# categorical: string + fill missing
-for c in cat_cols:
-    X_new[c] = X_new[c].astype("string").fillna("__MISSING__")
-
-# numeric conversion
-num_cols_new = [c for c in X_new.columns if c not in cat_cols]
-for c in num_cols_new:
-    X_new[c] = pd.to_numeric(X_new[c], errors="coerce")
-
-pred_new_bayes = float(np.clip(cat_model_bayes_best.predict(X_new)[0], 0, 10))
-print("\n=== Example prediction (Bayesian best) ===")
-print("Predicted note:", pred_new_bayes)
+if "X_new_encoded" in globals():
+    X_new_encoded = X_new_encoded.reindex(columns=X_train_encoded.columns, fill_value=0).astype(float)
+    pred_new = float(np.clip(xgb_bayes_best.predict(X_new_encoded)[0], clip_min, clip_max))
+    print("\n=== Example prediction ===")
+    print("Predicted note:", pred_new)
+else:
+    print("\nX_new_encoded not found -> skip example prediction")
 
 
 # ==============================
-# 10) SHAP (GLOBAL + EXAMPLE)
+# 10) SHAP (global + local) — clean and professional
 # ==============================
-sample_size = min(300, len(X_test))
-X_shap = X_test.sample(sample_size, random_state=42).copy()
+# Global SHAP on sample for speed
+sample_size = min(800, len(X_test_encoded))
+X_shap = X_test_encoded.sample(sample_size, random_state=42).copy()
 
-explainer_bayes = shap.TreeExplainer(cat_model_bayes_best)
-shap_values_bayes = explainer_bayes.shap_values(X_shap)
+explainer = shap.TreeExplainer(xgb_bayes_best)
+shap_values = explainer.shap_values(X_shap)
 
-print("\nSHAP: global feature importance (Bayesian best)")
-shap.summary_plot(shap_values_bayes, X_shap, show=True)
-
-print("\nSHAP: explanation for the example row (Bayesian best)")
-shap_values_one = explainer_bayes.shap_values(X_new)
-
-shap.plots.waterfall(
-    shap.Explanation(
-        values=shap_values_one[0],
-        base_values=explainer_bayes.expected_value,
-        data=X_new.iloc[0],
-        feature_names=X_new.columns
-    )
-)
+print("\nSHAP Global: summary plot")
+plt.figure()
+shap.summary_plot(shap_values, X_shap, show=False)
+plt.tight_layout()
 plt.show()
+
+print("\nSHAP Global: bar plot")
+plt.figure()
+shap.summary_plot(shap_values, X_shap, plot_type="bar", show=False)
+plt.tight_layout()
+plt.show()
+
+# Local SHAP for example row
+if "X_new_encoded" in globals():
+    shap_values_row = explainer.shap_values(X_new_encoded)
+    row_shap = np.array(shap_values_row)[0]
+
+    base_value = explainer.expected_value
+    if isinstance(base_value, (list, np.ndarray)):
+        base_value = float(np.array(base_value).reshape(-1)[0])
+    else:
+        base_value = float(base_value)
+
+    local_df = pd.DataFrame({
+        "feature": X_new_encoded.columns.astype(str),
+        "value_in_row": X_new_encoded.iloc[0].values,
+        "shap_value": row_shap,
+        "abs_shap": np.abs(row_shap),
+        "direction": np.where(row_shap > 0, "↑ augmente", np.where(row_shap < 0, "↓ diminue", "≈ neutre"))
+    }).sort_values("abs_shap", ascending=False).reset_index(drop=True)
+
+    print("\nTop 15 drivers (example row):")
+    display(local_df.head(15))
+
+    exp = shap.Explanation(
+        values=row_shap,
+        base_values=base_value,
+        data=X_new_encoded.iloc[0].values,
+        feature_names=X_new_encoded.columns.astype(str).tolist()
+    )
+
+    plt.figure()
+    shap.plots.waterfall(exp, max_display=15, show=False)
+    plt.tight_layout()
+
+    # Optional: remove E[f(X)] and f(x) labels from plot
+    ax = plt.gca()
+    ax.set_xlabel("")
+    for t in ax.texts:
+        txt = t.get_text()
+        if ("E[f" in txt) or ("f(x" in txt) or ("E[f(X)]" in txt):
+            t.set_visible(False)
+
+    plt.show()
+
 ```
