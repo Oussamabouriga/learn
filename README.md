@@ -1,174 +1,185 @@
 ```
-Bayesian hyperparameter optimization (idée générale)
+1) Métriques (comment les lire, quand c’est bon/mauvais, et comment comparer)
 
-Quand on optimise des hyperparamètres, on cherche la meilleure combinaison (ex: max_depth, learning_rate, etc.) sans tester toutes les possibilités.
+MAE — Mean Absolute Error
+	•	Ce que ça mesure : l’erreur moyenne en points de note (même unité que 0–10).
+	•	Lecture : “en moyenne, je me trompe de X points”.
+	•	Bon / mauvais :
+	•	Bon si MAE faible (ex: 0.8 meilleur que 1.6).
+	•	Mauvais si MAE élevé.
+	•	Pour comparer : excellent metric principale car très interprétable.
 
-Bayesian optimization fait ça de manière “intelligente” :
-	1.	On teste une configuration
-	2.	On observe le score (ex: RMSE moyen en K-Fold)
-	3.	On apprend une relation “paramètres → performance” à partir des essais déjà faits
-	4.	On choisit le prochain essai en équilibrant :
-	•	Exploitation : tester là où ça a l’air bon
-	•	Exploration : tester là où on est encore incertain
+RMSE — Root Mean Squared Error
+	•	Ce que ça mesure : erreur en points aussi, mais pénalise fortement les grosses erreurs.
+	•	Lecture : si RMSE >> MAE, ça veut dire que le modèle fait parfois de grosses erreurs.
+	•	Bon / mauvais :
+	•	Bon si faible.
+	•	Mauvais si élevé, surtout s’il monte alors que MAE reste stable.
+	•	Pour comparer : utile pour juger la stabilité et éviter un modèle qui fait quelques erreurs graves.
 
-Résultat : on trouve souvent de meilleurs hyperparamètres avec moins d’essais que Grid Search.
+R² — R-squared (coefficient de détermination)
+	•	Ce que ça mesure : proportion de la variance de la cible expliquée par le modèle.
+	•	Lecture simple :
+	•	1.0 = parfait
+	•	0.0 = pas mieux que prédire la moyenne
+	•	< 0 = pire que prédire la moyenne
+	•	Bon / mauvais :
+	•	Bon si proche de 1
+	•	Mauvais si proche de 0 ou négatif
+	•	Pour comparer : utile comme indicateur global, mais à lire avec MAE/RMSE.
 
-⸻
+MedianAE — Median Absolute Error
+	•	Ce que ça mesure : l’erreur “typique” (médiane), moins sensible aux outliers.
+	•	Lecture : “la moitié des prédictions ont une erreur ≤ X”.
+	•	Bon / mauvais :
+	•	Bon si faible
+	•	Pour comparer : utile si tu suspectes des valeurs extrêmes.
 
-Pourquoi Optuna est “Bayesian” dans la pratique ?
+MaxError — Maximum Error
+	•	Ce que ça mesure : la pire erreur observée.
+	•	Lecture : “dans le pire cas, je me suis trompé de X points”.
+	•	Bon / mauvais :
+	•	Bon si faible, mais peut être instable (1 seul cas peut tout changer).
+	•	Pour comparer : utile si tu veux limiter les pires cas, mais pas suffisant seul.
 
-Optuna utilise par défaut un algorithme appelé TPE (Tree-structured Parzen Estimator).
-Ce n’est pas un “GP Bayesian” classique (Gaussian Process) mais le principe est le même : utiliser l’historique pour proposer mieux.
+Explained Variance — Explained Variance Score
+	•	Ce que ça mesure : proche de R², mesure la part de variance captée.
+	•	Lecture : plus proche de 1 = mieux.
+	•	Pour comparer : similaire à R², souvent redondant.
 
-TPE en simple
-	•	Optuna garde toutes les tentatives passées (params, score).
-	•	Il sépare les essais en deux groupes :
-	•	bons essais (scores faibles si on minimise RMSE)
-	•	mauvais essais
-	•	Il modélise “où se trouvent les bons” vs “où se trouvent les mauvais”.
-	•	Il propose de nouveaux paramètres plus probables d’être bons.
+MSE — Mean Squared Error
+	•	Ce que ça mesure : erreur quadratique moyenne (pas en unité “points”).
+	•	Lecture : difficile à interpréter directement, préférer RMSE.
+	•	Pour comparer : utile pour optimisation mais moins lisible.
 
-⸻
+MAPE — Mean Absolute Percentage Error
+	•	Ce que ça mesure : erreur en % (|y - ŷ| / y).
+	•	Problème : si y = 0 (possible sur 0–10), MAPE devient énorme ou instable.
+	•	Conclusion : à éviter si la cible peut être 0.
 
-Comment Optuna fonctionne concrètement (dans ton code)
+sMAPE — symmetric MAPE
+	•	Ce que ça mesure : % symétrique, plus stable que MAPE.
+	•	Bon / mauvais : plus faible = mieux.
+	•	Pour comparer : utile, mais MAE/RMSE restent souvent plus fiables sur note 0–10.
 
-1) trial
-
-Chaque essai est un objet trial qui sert à :
-	•	tirer des hyperparamètres dans un espace donné
-	•	enregistrer le résultat
-
-Exemple :
-	•	trial.suggest_int("max_depth", 3, 10)
-	•	trial.suggest_float("learning_rate", 0.01, 0.2, log=True)
-
-2) objective(trial)
-
-C’est la fonction qui répond à la question :
-
-“Si je prends ces hyperparamètres, quelle est la performance du modèle ?”
-
-Dans ton cas, objective(trial) fait :
-	•	construit un modèle avec les hyperparamètres proposés
-	•	fait une validation croisée K-Fold
-	•	calcule un score moyen (ex: RMSE moyen)
-	•	retourne ce score à Optuna
-
-3) study.optimize(objective, n_trials=...)
-
-Optuna répète :
-	•	proposer une config
-	•	exécuter objective
-	•	stocker résultat
-	•	proposer mieux
-
-4) study.best_params
-
-A la fin, Optuna te donne :
-	•	la meilleure config trouvée
-	•	le meilleur score CV
-
-⸻
-
-Pourquoi c’est mieux que Random Search ?
-
-Random Search
-	•	teste au hasard
-	•	ne “retient” pas vraiment ce qui marche
-	•	plus tu veux de qualité, plus tu dois augmenter n_iter
-
-Bayesian / Optuna
-	•	apprend au fur et à mesure
-	•	évite de perdre des essais sur des zones nulles
-	•	converge plus vite vers une bonne zone
+Accuracy@±t — tolerance accuracy (régression)
+	•	Méthode : % de prédictions avec |y - ŷ| ≤ t (ex: t=0.5 ou 1).
+	•	Lecture : “X% des prédictions sont à moins de 1 point”.
+	•	Bon / mauvais :
+	•	Bon si élevé (ex: 70% > 50%)
+	•	Pour comparer : metric très “métier”, parfaite pour expliquer aux non-tech.
 
 ⸻
 
-Hyperparamètres Optuna les plus importants (ce que TU peux régler)
+Comment comparer des modèles correctement
 
-1) n_trials (le plus important)
-	•	nombre d’essais
-	•	plus grand = meilleure chance de trouver mieux, mais plus long
-
-Recommandation :
-	•	rapide : 20–30
-	•	correct : 40–80
-	•	sérieux : 100–200
-
-2) n_splits de K-Fold
-	•	3 folds = plus rapide mais plus bruité
-	•	5 folds = standard
-	•	10 folds = très stable mais lourd
-
-Bon compromis :
-	•	tuning : 3 folds
-	•	validation finale : 5 folds
-
-3) Les bornes de recherche (très important)
-
-Si tu donnes des bornes trop larges, Optuna explore trop.
-Si tu donnes des bornes bien choisies, Optuna converge vite.
-
-Exemple bon :
-	•	learning_rate: 0.01 → 0.15 (log)
-	•	max_depth: 3 → 10
-
-4) Le type de sampling
-	•	suggest_float(..., log=True) : très important pour des paramètres comme learning_rate, reg_lambda
-car la bonne valeur peut être 0.01 ou 0.1 et il faut explorer en échelle logarithmique.
+Tu compares toujours sur le même test set :
+	•		1.	Regarde MAE (erreur moyenne compréhensible)
+	•		2.	Regarde RMSE (grosses erreurs)
+	•		3.	Regarde Accuracy@±1 (utilisable métier)
+	•		4.	Utilise R² comme soutien (pas seul)
+	•		5.	Compare Train vs Test :
+	•	train beaucoup meilleur que test → surapprentissage possible
 
 ⸻
 
-“Exploitation vs Exploration” (simple)
+2) Méthodes de transformation des données (nom en anglais + explication + quand utiliser)
 
-Optuna essaie de trouver un compromis :
-	•	Exploitation : “j’ai vu que depth=6 marche bien, je reste autour”
-	•	Exploration : “je ne sais pas si depth=9 peut faire mieux, j’essaie”
+Data Cleaning
+	•	But : corriger données incohérentes, types incorrects, valeurs manquantes.
+	•	Quand : toujours en premier.
 
-Si tu fais peu de n_trials, il explore moins, donc le résultat peut être moins bon.
+Missing Values Handling
+	•	But : gérer les valeurs manquantes (np.nan).
+	•	Exemple : convertir des “0 métier” en NaN si 0 signifie “non renseigné”.
+	•	Quand : quand tu sais que 0 ne représente pas une vraie valeur.
 
-⸻
-
-Comment l’utiliser correctement dans ton cas (XGBoost/CatBoost + weights)
-
-Étape 1 (tuning)
-	•	KFold 3 splits
-	•	n_trials=40
-	•	objectif : RMSE CV
-
-Étape 2 (validation finale)
-	•	on prend best_params
-	•	on entraîne sur tout le train (avec weights)
-	•	on évalue sur test + SHAP
+Train/Test Split
+	•	But : séparer données pour évaluer la généralisation.
+	•	Important : le split doit être fait avant les transformations “apprises” (target encoding, scaling appris, etc.).
 
 ⸻
 
-Pièges fréquents (à éviter)
+One-Hot Encoding
+	•	But : convertir une catégorie en colonnes binaires.
+	•	Quand : variables catégorielles avec peu de catégories (faible cardinalité).
+	•	Avantage : simple, robuste.
+	•	Limite : explose le nombre de colonnes si trop de catégories.
 
-1) Sur-tuning CV (overfit sur la CV)
+Frequency / Count Encoding
+	•	But : remplacer chaque catégorie par sa fréquence d’apparition.
+	•	Quand : variables à forte cardinalité (ex: modèle téléphone, marque).
+	•	Avantage : compact, rapide.
+	•	Limite : perd l’information “qualitative” (deux catégories différentes peuvent avoir même fréquence).
 
-Si tu fais trop d’essais, tu peux optimiser “trop” sur la CV et perdre en test.
-Solution :
-	•	garder un vrai test set jamais touché
-	•	réduire l’espace de recherche
-	•	limiter n_trials raisonnablement
-
-2) Recherche trop large
-
-Solution :
-	•	resserrer les bornes après un premier run
-
-3) Temps énorme
-
-Solution :
-	•	réduire n_trials, n_splits, iterations/n_estimators
+Target Encoding
+	•	But : remplacer une catégorie par une statistique liée à la cible (ex: moyenne de la note par catégorie).
+	•	Quand : forte cardinalité, mais il faut une relation “catégorie → cible”.
+	•	Risque : data leakage si mal fait.
+	•	Règle : calculer sur train uniquement, idéalement avec CV/regularization.
 
 ⸻
 
-Phrase simple pour slide
+Log Transformation (log1p)
+	•	But : réduire l’effet des grosses valeurs (skewness), stabiliser la variance.
+	•	Utile pour : variables comme delai, montant, ancienneté très asymétriques.
+	•	Quand : si distribution très “longue” (beaucoup petits, quelques très grands).
+	•	log1p permet log(0+1) donc safe si valeurs ≥ 0.
 
-Bayesian Optimization (Optuna) : méthode qui teste des hyperparamètres de manière intelligente en apprenant des essais précédents, afin de trouver plus vite une bonne configuration qu’une recherche aléatoire ou exhaustive.
+⸻
 
-Si tu veux, je peux aussi te faire un mini schéma “Process Optuna” en 5 étapes pour la présentation.
+Data Scaling (pour variables numériques)
+
+Important : pour XGBoost / CatBoost, le scaling n’est souvent pas obligatoire, mais il peut aider selon les features.
+
+StandardScaler
+	•	Met moyenne=0, écart-type=1.
+	•	Quand : modèles sensibles à l’échelle (linéaires, SVM, KNN).
+	•	Pour XGBoost/CatBoost : pas essentiel.
+
+MinMaxScaler
+	•	Met les valeurs dans [0,1].
+	•	Quand : réseaux de neurones / KNN / méthodes distance.
+	•	Pas indispensable pour XGBoost/CatBoost.
+
+RobustScaler
+	•	Utilise médiane et IQR (robuste aux outliers).
+	•	Quand : beaucoup d’outliers.
+
+⸻
+
+“Scaling delai” (cas spécifique)
+
+Pour les variables de type delai très larges (0 → 5000 minutes / ou plus) :
+	•	Option 1 : Log Transformation (log1p) (souvent le meilleur)
+	•	Option 2 : Clipping / Winsorizing (couper les extrêmes)
+	•	Option 3 : Binning (transformer en classes d’intervalles) si tu veux une logique “tranches”.
+
+⸻
+
+3) Méthode utilisée pour le déséquilibre de la cible (nom anglais + comment ça marche)
+
+Sample Weighting for Imbalanced Regression
+
+(ou : Target-Bin Inverse Frequency Weighting)
+	•	Problème : la cible est concentrée (ex: beaucoup de 10), donc le modèle apprend surtout cette zone.
+	•	Méthode :
+	1.	On découpe la cible en tranches (bins)
+	2.	On calcule la fréquence de chaque tranche
+	3.	On donne un poids = 1 / fréquence
+	4.	On entraîne le modèle avec sample_weight (XGBoost) ou Pool(weight=...) (CatBoost)
+	•	Effet : les tranches rares comptent plus dans la loss pendant l’apprentissage.
+
+Quand l’utiliser :
+	•	quand tu veux mieux traiter des cas rares (ex: mauvaises notes)
+	•	quand le modèle “prédit trop souvent la moyenne / les notes hautes”
+
+Attention :
+	•	si les poids sont trop agressifs, la performance globale peut baisser
+	•	il faut contrôler n_bins et clipper les poids
+
+⸻
+
+Si tu veux, je peux te transformer tout ça en slides ultra courtes (1 ligne par métrique + 1 ligne par méthode) pour que ce soit directement utilisable en présentation.
 
 ```
