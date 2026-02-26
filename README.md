@@ -1,4 +1,5 @@
 ```
+
 # ============================================================
 # XGBOOST — BAYESIAN OPTIMIZATION (Optuna, MULTI-OBJECTIVE)
 # CV objectives (on training folds only):
@@ -328,5 +329,4 @@ if "X_new_encoded" in globals():
             t.set_visible(False)
 
     plt.show()
-
 ```
