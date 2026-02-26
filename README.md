@@ -1,257 +1,174 @@
 ```
-XGBoost (régression) — ce qu’on a utilisé, quoi changer, et à quoi ça sert
+Bayesian hyperparameter optimization (idée générale)
 
-Modèle 1 — Baseline XGBoost (sans pondération)
-Hyperparamètres typiques qu’on a fixés :
-	•	objective="reg:squarederror" : fonction de perte (erreur quadratique).
-	•	eval_metric="rmse" : métrique suivie pendant l’entraînement.
-	•	n_estimators : nombre d’arbres (itérations).
-	•	learning_rate : taille du pas (à quel point chaque arbre corrige).
-	•	max_depth : profondeur max des arbres (complexité).
-	•	min_child_weight : minimum d’exemples/poids dans une feuille (évite splits trop spécifiques).
-	•	gamma : seuil minimal d’amélioration pour faire un split (plus grand = plus conservateur).
-	•	subsample : % de lignes utilisées par arbre (régularise).
-	•	colsample_bytree : % de variables utilisées par arbre (régularise).
-	•	reg_alpha : régularisation L1 (sparsité).
-	•	reg_lambda : régularisation L2 (stabilité).
-	•	tree_method="hist" : méthode rapide de construction d’arbres.
-	•	missing=np.nan : traitement des valeurs manquantes.
-	•	n_jobs=-1 : multi-cœurs.
-	•	random_state : reproductibilité.
-	•	verbosity : logs.
+Quand on optimise des hyperparamètres, on cherche la meilleure combinaison (ex: max_depth, learning_rate, etc.) sans tester toutes les possibilités.
 
-Ce que tu peux changer facilement :
-	•	n_estimators, learning_rate, max_depth (impact le plus fort)
-	•	subsample, colsample_bytree (surapprentissage / robustesse)
-	•	reg_alpha, reg_lambda, gamma (régularisation)
+Bayesian optimization fait ça de manière “intelligente” :
+	1.	On teste une configuration
+	2.	On observe le score (ex: RMSE moyen en K-Fold)
+	3.	On apprend une relation “paramètres → performance” à partir des essais déjà faits
+	4.	On choisit le prochain essai en équilibrant :
+	•	Exploitation : tester là où ça a l’air bon
+	•	Exploration : tester là où on est encore incertain
+
+Résultat : on trouve souvent de meilleurs hyperparamètres avec moins d’essais que Grid Search.
 
 ⸻
 
-Modèle 2 — XGBoost avec “Sample Weighting” (déséquilibre de cible)
-Même modèle que baseline + une technique :
-	•	sample_weight passé dans fit(...)
+Pourquoi Optuna est “Bayesian” dans la pratique ?
 
-Technique utilisée : Inverse Frequency Binning + Sample Weights
-	•	On découpe la cible en tranches (bins)
-	•	Poids = 1 / fréquence de la tranche
-	•	(option) normalisation et clipping des poids
+Optuna utilise par défaut un algorithme appelé TPE (Tree-structured Parzen Estimator).
+Ce n’est pas un “GP Bayesian” classique (Gaussian Process) mais le principe est le même : utiliser l’historique pour proposer mieux.
 
-Ce que tu peux changer :
-	•	n_bins (nombre de tranches)
-	•	clip_min, clip_max (évite des poids trop extrêmes)
-	•	“force” de pondération (par ex racine carrée de l’inverse fréquence au lieu de l’inverse)
-
-⸻
-
-Modèle 3 — XGBoost Random Search (pondéré)
-Optimisation utilisée : RandomizedSearchCV
-	•	param_distributions : listes (ou distributions) testées
-	•	n_iter : nombre d’essais (plus grand = plus de chances de trouver mieux, mais plus long)
-	•	cv=KFold(n_splits=5) : validation croisée
-	•	scoring="neg_root_mean_squared_error" : score de sélection
-	•	refit=True : réentraîne le meilleur modèle sur tout le train
-
-Ce que tu peux changer :
-	•	n_iter : 20–50 (rapide), 80–150 (plus sérieux)
-	•	n_splits : 3 (vite), 5 (standard)
-	•	l’espace param_distributions (plus large = mieux mais plus long)
+TPE en simple
+	•	Optuna garde toutes les tentatives passées (params, score).
+	•	Il sépare les essais en deux groupes :
+	•	bons essais (scores faibles si on minimise RMSE)
+	•	mauvais essais
+	•	Il modélise “où se trouvent les bons” vs “où se trouvent les mauvais”.
+	•	Il propose de nouveaux paramètres plus probables d’être bons.
 
 ⸻
 
-Modèle 4 — XGBoost Small Grid Search (pondéré)
-Optimisation utilisée : GridSearchCV ciblé
-	•	param_grid : petite grille autour des meilleurs paramètres
-	•	cv=KFold(n_splits=5)
-	•	scoring idem
-	•	refit=True
+Comment Optuna fonctionne concrètement (dans ton code)
 
-Ce que tu peux changer :
-	•	la largeur autour des meilleurs params (±1 depth, ±0.01 lr, etc.)
-	•	n_splits
-	•	la taille de la grille (plus grande = explosion du temps)
+1) trial
 
-⸻
+Chaque essai est un objet trial qui sert à :
+	•	tirer des hyperparamètres dans un espace donné
+	•	enregistrer le résultat
 
-Modèle 5 — XGBoost Bayesian Optimization (Optuna) (pondéré)
-Optimisation utilisée : Optuna (TPE Bayesian-like)
-	•	n_trials : nombre d’essais (paramètre principal)
-	•	distributions trial.suggest_* : bornes et type (log, int, float)
-	•	KFold(n_splits=5) intégré dans l’objectif
-	•	objectif : minimiser RMSE
+Exemple :
+	•	trial.suggest_int("max_depth", 3, 10)
+	•	trial.suggest_float("learning_rate", 0.01, 0.2, log=True)
 
-Ce que tu peux changer :
-	•	n_trials : 30–60 (bon), 80–200 (si budget)
-	•	n_splits : 3 pour accélérer, puis 5 pour confirmer
-	•	bornes des hyperparamètres (resserrer si tu as déjà une bonne zone)
+2) objective(trial)
 
-⸻
+C’est la fonction qui répond à la question :
 
-Fonction de perte XGBoost (objective) — ce qu’on a utilisé + alternatives
+“Si je prends ces hyperparamètres, quelle est la performance du modèle ?”
 
-Utilisée :
-	•	reg:squarederror : optimise MSE (classique), bon point de départ.
+Dans ton cas, objective(trial) fait :
+	•	construit un modèle avec les hyperparamètres proposés
+	•	fait une validation croisée K-Fold
+	•	calcule un score moyen (ex: RMSE moyen)
+	•	retourne ce score à Optuna
 
-Autres objectives utiles :
-	•	reg:absoluteerror : optimise MAE, plus robuste aux outliers (si dispo selon version xgboost)
-	•	reg:pseudohubererror : compromis entre MAE et MSE, robuste aux gros écarts
-	•	count:poisson : si cible type “compte” (pas ton cas)
+3) study.optimize(objective, n_trials=...)
 
-⸻
+Optuna répète :
+	•	proposer une config
+	•	exécuter objective
+	•	stocker résultat
+	•	proposer mieux
 
-Hyperparamètres XGBoost — explication simple (les plus importants)
-	•	n_estimators : nombre d’arbres. Trop élevé = risque d’overfit si pas régularisé.
-	•	learning_rate : “force” de correction par arbre. Petit = plus stable.
-	•	max_depth : complexité des arbres. Grand = risque d’overfit.
-	•	min_child_weight : empêche les splits sur peu d’exemples.
-	•	gamma : empêche les splits inutiles (plus grand = plus strict).
-	•	subsample : réduit overfit en utilisant un sous-échantillon de lignes.
-	•	colsample_bytree : réduit overfit en utilisant un sous-échantillon de variables.
-	•	reg_alpha : L1 (met certains poids à zéro, simplifie).
-	•	reg_lambda : L2 (stabilise).
-	•	tree_method="hist" : accélère.
-	•	max_delta_step : limite l’amplitude des mises à jour (souvent peu important en régression).
-	•	grow_policy / max_leaves : structure des arbres (plus avancé, utile sur grands datasets).
+4) study.best_params
+
+A la fin, Optuna te donne :
+	•	la meilleure config trouvée
+	•	le meilleur score CV
 
 ⸻
 
-CatBoost — modèles, hyperparamètres et optimisation
-
-Pourquoi CatBoost change la transformation ?
-	•	CatBoost prend directement les colonnes catégorielles via cat_features
-	•	Donc pas besoin de One-Hot / Frequency / Target encoding (sauf cas spécifiques)
-
-⸻
-
-Modèle 1 — CatBoost Baseline
-
-Hyperparamètres typiques :
-	•	loss_function="RMSE" : perte / objectif
-	•	iterations : nombre d’arbres (comme n_estimators)
-	•	learning_rate : pas d’apprentissage
-	•	depth : profondeur des arbres
-	•	l2_leaf_reg : régularisation L2 (important)
-	•	random_strength : ajoute de l’aléatoire pour réduire l’overfit
-	•	bagging_temperature : contrôle le bagging (diversité)
-	•	bootstrap_type="Bernoulli" + subsample : sous-échantillonnage des lignes
-	•	colsample_bylevel : sous-échantillonnage de variables par niveau
-	•	early_stopping_rounds : stop si pas d’amélioration
-	•	allow_writing_files=False : pas de fichiers CatBoost
-
-Ce que tu peux changer facilement :
-	•	iterations, learning_rate, depth
-	•	l2_leaf_reg
-	•	subsample, bagging_temperature
-	•	random_strength
-
-⸻
-
-Modèle 2 — CatBoost avec Sample Weighting (déséquilibre de cible)
-
-Même modèle + une technique :
-	•	Pool(..., weight=weights_train)
-=> pondère l’entraînement pour mieux apprendre les zones rares du target
-
-Ce que tu peux changer :
-	•	n_bins pour la création des poids
-	•	clip_min, clip_max
-	•	la stratégie de pondération (plus douce si besoin)
-
-⸻
-
-Modèle 3 — CatBoost Random Search (pondéré)
-
-On teste plusieurs configs au hasard (comme XGBoost), mais souvent via :
-	•	ParameterSampler + CV manuelle (parce que CatBoost + weights + Pool)
-
-Ce que tu peux changer :
-	•	n_iter : nombre d’essais
-	•	n_splits : folds CV
-	•	l’espace de paramètres testé
-
-⸻
-
-Modèle 4 — CatBoost Small Grid Search (pondéré)
-
-Grid ciblée autour du meilleur Random Search
-Ce que tu peux changer :
-	•	la taille de la grille (très important)
-	•	n_splits (3 vs 5)
-
-⸻
-
-Modèle 5 — CatBoost Bayesian (Optuna) (pondéré)
-
-Même logique que pour XGBoost :
-	•	n_trials
-	•	bornes suggest_*
-	•	KFold CV
-	•	objective = RMSE moyen
-
-Ce que tu peux changer :
-	•	n_trials : paramètre principal
-	•	n_splits : accélérer
-	•	resserrer les bornes selon ce que tu as trouvé avec random/grid
-
-⸻
-
-Fonction de perte CatBoost — utilisée + alternatives
-
-Utilisée :
-	•	loss_function="RMSE"
-
-Alternatives utiles :
-	•	loss_function="MAE" : plus robuste aux outliers
-	•	loss_function="Huber" : compromis MAE/RMSE
-	•	loss_function="Quantile" : si tu veux prédire une quantile (ex: 0.9 pour pessimiste)
-	•	loss_function="LogCosh" : robuste et stable
-
-⸻
-
-Techniques d’optimisation — résumé et quoi régler
+Pourquoi c’est mieux que Random Search ?
 
 Random Search
-	•	Paramètres à régler :
-	•	n_iter (le plus important)
-	•	cv folds (3 ou 5)
-	•	l’espace de recherche
+	•	teste au hasard
+	•	ne “retient” pas vraiment ce qui marche
+	•	plus tu veux de qualité, plus tu dois augmenter n_iter
 
-Quand l’utiliser :
-	•	début de tuning, budget limité
-
-Grid Search (Small)
-	•	Paramètres à régler :
-	•	taille de grille (petite)
-	•	folds CV
-
-Quand l’utiliser :
-	•	après random, pour affiner
-
-Bayesian (Optuna)
-	•	Paramètres à régler :
-	•	n_trials (principal)
-	•	bornes de recherche
-	•	folds CV
-
-Quand l’utiliser :
-	•	quand tu veux optimiser fort avec moins d’essais qu’une grille
+Bayesian / Optuna
+	•	apprend au fur et à mesure
+	•	évite de perdre des essais sur des zones nulles
+	•	converge plus vite vers une bonne zone
 
 ⸻
 
-Recommandation pratique (très simple)
+Hyperparamètres Optuna les plus importants (ce que TU peux régler)
 
-Pour ton cas (note 0–10, dataset déséquilibré) :
-	1.	Baseline
-	2.	Sample Weighting (déséquilibre)
-	3.	Random Search (20–50 essais)
-	4.	Bayesian Optuna (40–80 essais) si tu veux le meilleur
-	5.	Small Grid uniquement si tu veux un réglage fin autour des meilleurs
+1) n_trials (le plus important)
+	•	nombre d’essais
+	•	plus grand = meilleure chance de trouver mieux, mais plus long
+
+Recommandation :
+	•	rapide : 20–30
+	•	correct : 40–80
+	•	sérieux : 100–200
+
+2) n_splits de K-Fold
+	•	3 folds = plus rapide mais plus bruité
+	•	5 folds = standard
+	•	10 folds = très stable mais lourd
+
+Bon compromis :
+	•	tuning : 3 folds
+	•	validation finale : 5 folds
+
+3) Les bornes de recherche (très important)
+
+Si tu donnes des bornes trop larges, Optuna explore trop.
+Si tu donnes des bornes bien choisies, Optuna converge vite.
+
+Exemple bon :
+	•	learning_rate: 0.01 → 0.15 (log)
+	•	max_depth: 3 → 10
+
+4) Le type de sampling
+	•	suggest_float(..., log=True) : très important pour des paramètres comme learning_rate, reg_lambda
+car la bonne valeur peut être 0.01 ou 0.1 et il faut explorer en échelle logarithmique.
 
 ⸻
 
-Si tu veux, je peux te produire une table “slide-ready” :
-	•	colonne 1: modèle / technique
-	•	colonne 2: hyperparamètres utilisés
-	•	colonne 3: paramètres que tu peux ajuster (n_trials, n_iter, n_splits, etc.)
-	•	colonne 4: objectif/metric (RMSE/MAE)
+“Exploitation vs Exploration” (simple)
+
+Optuna essaie de trouver un compromis :
+	•	Exploitation : “j’ai vu que depth=6 marche bien, je reste autour”
+	•	Exploration : “je ne sais pas si depth=9 peut faire mieux, j’essaie”
+
+Si tu fais peu de n_trials, il explore moins, donc le résultat peut être moins bon.
+
+⸻
+
+Comment l’utiliser correctement dans ton cas (XGBoost/CatBoost + weights)
+
+Étape 1 (tuning)
+	•	KFold 3 splits
+	•	n_trials=40
+	•	objectif : RMSE CV
+
+Étape 2 (validation finale)
+	•	on prend best_params
+	•	on entraîne sur tout le train (avec weights)
+	•	on évalue sur test + SHAP
+
+⸻
+
+Pièges fréquents (à éviter)
+
+1) Sur-tuning CV (overfit sur la CV)
+
+Si tu fais trop d’essais, tu peux optimiser “trop” sur la CV et perdre en test.
+Solution :
+	•	garder un vrai test set jamais touché
+	•	réduire l’espace de recherche
+	•	limiter n_trials raisonnablement
+
+2) Recherche trop large
+
+Solution :
+	•	resserrer les bornes après un premier run
+
+3) Temps énorme
+
+Solution :
+	•	réduire n_trials, n_splits, iterations/n_estimators
+
+⸻
+
+Phrase simple pour slide
+
+Bayesian Optimization (Optuna) : méthode qui teste des hyperparamètres de manière intelligente en apprenant des essais précédents, afin de trouver plus vite une bonne configuration qu’une recherche aléatoire ou exhaustive.
+
+Si tu veux, je peux aussi te faire un mini schéma “Process Optuna” en 5 étapes pour la présentation.
 
 ```
