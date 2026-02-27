@@ -1,5 +1,25 @@
 ```
 
+Notes (important)
+
+1) Why your regression predicted outside the class before
+
+Because the regressor was trained on all values (or not clipped), so it could output any number.
+✅ Here we enforce:
+
+pred = np.clip(pred, lo, hi)
+
+both during CV and during final prediction, so it cannot escape the class interval.
+
+2) Which “accuracy” is optimized in Optuna here?
+	•	Classifier Optuna: maximizes CV classification accuracy (train folds → val fold).
+	•	Regressor Optuna: minimizes CV RMSE inside its class.
+	•	Then you evaluate on your held-out test set.
+
+If you want the classifier objective to be macro-F1 (better for imbalance), tell me and I’ll switch it.
+
+
+
 
 
 	•	Step A: build 5 classes from your note (0–10)
