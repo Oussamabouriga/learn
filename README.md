@@ -1,173 +1,152 @@
 ```
 # ============================================================
-# XGBoost CLASSIFICATION — RANDOM SEARCH + CLASS WEIGHTING
-# (NO Target Encoding) + Metrics + ROC (OvR) + Confusion Matrix
-# + SHAP Global + SHAP for your example row
-# + Save model to: models/xgboost/classification/<MODEL_NAME>/
-#
-# Assumes you ALREADY prepared (encoded) data like before:
-#   X_train_encoded_no_te, X_test_encoded_no_te
-#   y_train_no_te, y_test_no_te   (continuous satisfaction target)
-# And you already have your example row prepared (encoded) OR raw:
-#   - If raw: X_new_encoded_no_te (aligned to X_train_encoded_no_te columns)
-#   - If already encoded: X_new_xgb_cls_no_te
+# XGBoost CLASSIFICATION — RANDOM SEARCH (NO target encoding)
+# + Train best model
+# + Metrics (accuracy / F1 / precision / recall)
+# + ROC curves (OvR) with class names
+# + Confusion matrix with class names
+# + SHAP global + SHAP local (example row)
 # ============================================================
 
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
 
+from xgboost import XGBClassifier
 
-class_names = {
-    0: "Extrêmement mauvais (0–2)",
-    1: "Mauvais (3–6)",
-    2: "Neutre (7–8)",
-    3: "Bien (9)",
-    4: "Très bien (10)"
-}
-class_labels_in_order = [class_names[i] for i in range(5)]
-
-
-# ==============================
-# 2) X data (encoded, numeric)
-#    Fix feature names (XGBoost error with [, ] , <)
-# ==============================
-X_train_xgb_cls = X_train_encoded_no_te.copy()
-X_test_xgb_cls  = X_test_encoded_no_te.copy()
-
-# Force numeric float
-X_train_xgb_cls = X_train_xgb_cls.apply(pd.to_numeric, errors="coerce").astype(float)
-X_test_xgb_cls  = X_test_xgb_cls.apply(pd.to_numeric, errors="coerce").astype(float)
-
-# Clean feature names to avoid: "feature_names must be string, and may not contain [, ] or <"
-def _clean_feature_names(cols):
-    cols = cols.astype(str)
-    cols = cols.str.replace("[", "(", regex=False)
-    cols = cols.str.replace("]", ")", regex=False)
-    cols = cols.str.replace("<", "lt_", regex=False)
-    cols = cols.str.replace(">", "gt_", regex=False)
-    cols = cols.str.replace(",", "_", regex=False)
-    return cols
-
-X_train_xgb_cls.columns = _clean_feature_names(X_train_xgb_cls.columns.to_series()).values
-X_test_xgb_cls.columns  = _clean_feature_names(X_test_xgb_cls.columns.to_series()).values
-
-
-# ==============================
-# 3) Class weighting -> sample_weight (TRAIN ONLY)
-# ==============================
-classes = np.unique(y_train_cls.values)
-cw = compute_class_weight(class_weight="balanced", classes=classes, y=y_train_cls.values)
-class_weight_dict = dict(zip(classes, cw))
-
-sample_weight_train_cls = y_train_cls.map(class_weight_dict).values.astype(float)
-
-print("Class weights:", class_weight_dict)
-print("Train shape:", X_train_xgb_cls.shape, "| Test shape:", X_test_xgb_cls.shape)
-
-
-# ==============================
-# 4) Random Search config
-# ==============================
-random_state = 42
-
-base_clf = XGBClassifier(
-    objective="multi:softprob",
-    num_class=5,
-    tree_method="hist",
-    eval_metric="mlogloss",
-    n_jobs=-1,
-    random_state=random_state,
-    verbosity=0
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+from sklearn.metrics import (
+    accuracy_score, f1_score, precision_score, recall_score,
+    classification_report, confusion_matrix, roc_curve, auc
 )
 
+import shap
+
+# ==============================
+# 0) DATA (use your existing variables)
+#    Change these 4 names if yours are different.
+# ==============================
+X_train = X_train_xgb_cls_base.copy()
+X_test  = X_test_xgb_cls_base.copy()
+y_train = y_train_xgb_cls_base.copy()
+y_test  = y_test_xgb_cls_base.copy()
+
+# Example row already prepared/encoded for classification (1 row DataFrame)
+# If you don't have it yet, set it to a real encoded row with same columns as X_train.
+X_example = X_example_cls.copy()   # must be DataFrame with same columns as X_train
+
+# Make sure feature names are strings and safe for XGBoost
+X_train.columns = X_train.columns.astype(str).str.replace(r"[\[\]<>]", "_", regex=True)
+X_test.columns  = X_test.columns.astype(str).str.replace(r"[\[\]<>]", "_", regex=True)
+X_example = X_example.copy()
+X_example.columns = X_example.columns.astype(str).str.replace(r"[\[\]<>]", "_", regex=True)
+
+# Align example to train columns
+X_example = X_example.reindex(columns=X_train.columns, fill_value=0)
+
+# ==============================
+# 1) Class names (index -> label)
+# ==============================
+class_names = [
+    "Extrêmement mauvais (0–2)",
+    "Mauvais (3–6)",
+    "Neutre (7–8)",
+    "Bien (9)",
+    "Très bien (10)",
+]
+num_classes = len(class_names)
+
+# ==============================
+# 2) Baseline model (used by Random Search)
+# ==============================
+xgb_cls_base = XGBClassifier(
+    objective="multi:softprob",
+    num_class=num_classes,
+    tree_method="hist",
+    n_jobs=-1,
+    random_state=42,
+    eval_metric="mlogloss",
+)
+
+# ==============================
+# 3) Random Search setup (compute-friendly)
+# ==============================
 param_distributions = {
     "n_estimators": [200, 400, 600, 800, 1000],
     "learning_rate": [0.01, 0.02, 0.03, 0.05, 0.08, 0.1],
     "max_depth": [3, 4, 5, 6, 7, 8],
-    "min_child_weight": [1, 2, 3, 5, 8, 12],
-    "gamma": [0.0, 0.1, 0.3, 0.7, 1.0],
+    "min_child_weight": [1, 2, 3, 5, 7, 10],
+    "gamma": [0.0, 0.1, 0.3, 0.5, 1.0],
     "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
     "colsample_bytree": [0.6, 0.7, 0.8, 0.9, 1.0],
     "reg_alpha": [0.0, 0.001, 0.01, 0.1, 1.0],
     "reg_lambda": [0.5, 1.0, 2.0, 5.0],
 }
 
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=random_state)
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-random_search_xgb_cls = RandomizedSearchCV(
-    estimator=base_clf,
+random_search = RandomizedSearchCV(
+    estimator=xgb_cls_base,
     param_distributions=param_distributions,
-    n_iter=40,                 # adjust 20..80 depending on compute
-    scoring="f1_macro",        # good for imbalanced multi-class
+    n_iter=40,                 # increase to 60-100 if you have more compute
+    scoring="f1_macro",        # good metric for imbalanced multi-class
     cv=cv,
     verbose=2,
-    random_state=random_state,
+    random_state=42,
     n_jobs=-1,
     refit=True
 )
 
+# ==============================
+# 4) Fit Random Search
+# ==============================
+random_search.fit(X_train, y_train)
+
+xgb_cls_random_best = random_search.best_estimator_
+print("\nBest params (Random Search):")
+print(random_search.best_params_)
+print("Best CV score (f1_macro):", random_search.best_score_)
 
 # ==============================
-# 5) Fit Random Search (pass sample_weight)
+# 5) Predictions + Probabilities
 # ==============================
-random_search_xgb_cls.fit(X_train_xgb_cls, y_train_cls, sample_weight=sample_weight_train_cls)
+pred_train = xgb_cls_random_best.predict(X_train)
+pred_test  = xgb_cls_random_best.predict(X_test)
 
-best_xgb_cls = random_search_xgb_cls.best_estimator_
-best_params = random_search_xgb_cls.best_params_
-best_cv_score = random_search_xgb_cls.best_score_
-
-print("\nBest CV f1_macro:", best_cv_score)
-print("Best params:", best_params)
-
+proba_train = xgb_cls_random_best.predict_proba(X_train)
+proba_test  = xgb_cls_random_best.predict_proba(X_test)
 
 # ==============================
-# 6) Evaluate Train/Test
+# 6) Metrics (Train/Test)
 # ==============================
-pred_train = best_xgb_cls.predict(X_train_xgb_cls)
-pred_test  = best_xgb_cls.predict(X_test_xgb_cls)
+def _cls_metrics(y_true, y_pred):
+    return {
+        "Accuracy": accuracy_score(y_true, y_pred),
+        "F1_macro": f1_score(y_true, y_pred, average="macro"),
+        "Precision_macro": precision_score(y_true, y_pred, average="macro", zero_division=0),
+        "Recall_macro": recall_score(y_true, y_pred, average="macro", zero_division=0),
+        "F1_weighted": f1_score(y_true, y_pred, average="weighted"),
+    }
 
-proba_train = best_xgb_cls.predict_proba(X_train_xgb_cls)
-proba_test  = best_xgb_cls.predict_proba(X_test_xgb_cls)
+m_train = _cls_metrics(y_train, pred_train)
+m_test  = _cls_metrics(y_test, pred_test)
 
-acc_train = accuracy_score(y_train_cls, pred_train)
-acc_test  = accuracy_score(y_test_cls, pred_test)
+metrics_df = pd.DataFrame([m_train, m_test], index=["Train", "Test"]).T
+print("\n=== Résumé métriques (classification) ===")
+display(metrics_df)
 
-bacc_train = balanced_accuracy_score(y_train_cls, pred_train)
-bacc_test  = balanced_accuracy_score(y_test_cls, pred_test)
-
-f1_train_macro = f1_score(y_train_cls, pred_train, average="macro")
-f1_test_macro  = f1_score(y_test_cls,  pred_test,  average="macro")
-
-prec_test_macro = precision_score(y_test_cls, pred_test, average="macro", zero_division=0)
-rec_test_macro  = recall_score(y_test_cls, pred_test, average="macro", zero_division=0)
-
-print("\n=== Metrics (TRAIN) ===")
-print("Accuracy:", acc_train)
-print("Balanced Accuracy:", bacc_train)
-print("F1 macro:", f1_train_macro)
-
-print("\n=== Metrics (TEST) ===")
-print("Accuracy:", acc_test)
-print("Balanced Accuracy:", bacc_test)
-print("F1 macro:", f1_test_macro)
-print("Precision macro:", prec_test_macro)
-print("Recall macro:", rec_test_macro)
-
-print("\n=== Classification report (TEST) ===")
-print(classification_report(
-    y_test_cls, pred_test,
-    target_names=class_labels_in_order,
-    zero_division=0
-))
-
+print("\n=== Rapport classification (TEST) ===")
+print(classification_report(y_test, pred_test, target_names=class_names, digits=3))
 
 # ==============================
-# 7) ROC curves (OvR) by class (TEST)
+# 7) ROC curves (OvR) by class (with names)
 # ==============================
-plt.figure(figsize=(8, 6))
-for c in range(5):
-    y_true_bin = (y_test_cls.values == c).astype(int)
+plt.figure(figsize=(7, 6))
+for c in range(num_classes):
+    y_true_bin = (y_test.values == c).astype(int)
     fpr, tpr, _ = roc_curve(y_true_bin, proba_test[:, c])
-    auc_c = auc(fpr, tpr)
-    plt.plot(fpr, tpr, label=f"{class_names[c]} (AUC={auc_c:.3f})")
+    roc_auc = auc(fpr, tpr)
+    plt.plot(fpr, tpr, label=f"{class_names[c]} (AUC={roc_auc:.2f})")
 
 plt.plot([0, 1], [0, 1], linestyle="--")
 plt.title("Courbes ROC (One-vs-Rest) — jeu de test")
@@ -178,133 +157,93 @@ plt.grid(True, alpha=0.3)
 plt.tight_layout()
 plt.show()
 
-
 # ==============================
-# 8) Confusion matrix (TEST)
+# 8) Confusion matrix (with names)
 # ==============================
-cm = confusion_matrix(y_test_cls, pred_test)
-cm_df = pd.DataFrame(cm, index=[f"Réel: {class_names[i]}" for i in range(5)],
-                     columns=[f"Prédit: {class_names[i]}" for i in range(5)])
-print("\nMatrice de confusion (test)")
+cm = confusion_matrix(y_test, pred_test, labels=list(range(num_classes)))
+cm_df = pd.DataFrame(
+    cm,
+    index=[f"Réel — {name}" for name in class_names],
+    columns=[f"Prédit — {name}" for name in class_names],
+)
+print("\nMatrice de confusion (TEST)")
 display(cm_df)
 
+# ==============================
+# 9) Example prediction
+# ==============================
+pred_example_class = int(xgb_cls_random_best.predict(X_example)[0])
+proba_example = xgb_cls_random_best.predict_proba(X_example)[0]
+
+print("\n=== Exemple (1 ligne) ===")
+print("Classe prédite:", pred_example_class, "-", class_names[pred_example_class])
+print("Probabilités par classe:")
+for i, p in enumerate(proba_example):
+    print(f"  {i} - {class_names[i]} : {p:.4f}")
 
 # ==============================
-# 9) SHAP — Global + Example row
-#    Fix: SHAP multiclass output shape differences
+# 10) SHAP (GLOBAL + LOCAL)
+#     Fixes the common shape mismatch:
+#     - if SHAP returns a bias/offset column => drop last column
 # ==============================
-# Sample for speed
-sample_size = min(300, len(X_test_xgb_cls))
-X_shap = X_test_xgb_cls.sample(sample_size, random_state=42)
 
-explainer = shap.TreeExplainer(best_xgb_cls)
+# Use a sample for speed
+sample_size = min(400, len(X_test))
+X_shap = X_test.sample(sample_size, random_state=42)
+
+explainer = shap.TreeExplainer(xgb_cls_random_best)
 shap_values = explainer.shap_values(X_shap)
 
-# In multiclass, shap_values is usually a list: [array(n, p), ...] per class
-# We choose which class to visualize globally:
-class_for_global = 0  # change 0..4 if you want
-print("\nSHAP global (summary) — classe:", class_for_global, "-", class_names[class_for_global])
-
-if isinstance(shap_values, list):
-    shap.summary_plot(shap_values[class_for_global], X_shap, show=True)
-    shap.summary_plot(shap_values[class_for_global], X_shap, plot_type="bar", show=True)
-else:
-    # fallback (rare): single array
-    shap.summary_plot(shap_values, X_shap, show=True)
-    shap.summary_plot(shap_values, X_shap, plot_type="bar", show=True)
-
-
-# ==============================
-# 10) Predict your example row + SHAP local
-#     You MUST provide it already encoded & aligned to training columns
-# ==============================
-# If you already built an encoded example row aligned to X_train_encoded_no_te:
-# Example variable name: X_new_encoded_no_te (1 row)
-# If you named it differently, set it here:
-X_one_cls = None
-
-# Try to detect common names; otherwise set manually
-for cand in ["X_new_encoded_no_te", "X_new_xgb_cls_no_te", "X_new_no_te_encoded"]:
-    if cand in globals():
-        X_one_cls = globals()[cand]
-        break
-
-if X_one_cls is None:
-    print("\n[INFO] No encoded example row found. Create it and name it X_new_encoded_no_te (1-row DataFrame).")
-else:
-    X_one_cls = X_one_cls.copy()
-    # Ensure same columns + order + clean names
-    X_one_cls = X_one_cls.reindex(columns=X_train_xgb_cls.columns, fill_value=0)
-    X_one_cls.columns = X_train_xgb_cls.columns
-    X_one_cls = X_one_cls.apply(pd.to_numeric, errors="coerce").astype(float)
-
-    proba_ex = best_xgb_cls.predict_proba(X_one_cls)[0]
-    pred_ex_class = int(np.argmax(proba_ex))
-    print("\n=== Example prediction ===")
-    print("Classe prédite:", pred_ex_class, "-", class_names[pred_ex_class])
-    print("Probabilités par classe:")
-    for i in range(5):
-        print(f"  {i} - {class_names[i]}: {proba_ex[i]:.4f}")
-
-    # Local SHAP for predicted class
-    shap_one = explainer.shap_values(X_one_cls)
-
-    if isinstance(shap_one, list):
-        sv = shap_one[pred_ex_class][0]  # (p,)
-        base_val = explainer.expected_value[pred_ex_class] if isinstance(explainer.expected_value, (list, np.ndarray)) else explainer.expected_value
+def _get_shap_for_class(shap_values, class_idx):
+    # shap_values can be:
+    # - list of arrays [class] -> (n_samples, n_features)  OR (n_samples, n_features+1)
+    # - array (n_samples, n_features, n_classes) OR (n_samples, n_features+1, n_classes)
+    if isinstance(shap_values, list):
+        sv = shap_values[class_idx]
     else:
-        sv = shap_one[0]
-        base_val = explainer.expected_value
+        sv = shap_values[:, :, class_idx]
 
-    # Waterfall explanation
-    shap.plots.waterfall(
-        shap.Explanation(
-            values=sv,
-            base_values=base_val,
-            data=X_one_cls.iloc[0],
-            feature_names=X_one_cls.columns
-        ),
-        max_display=20
-    )
-    plt.show()
+    # Drop possible bias column if present
+    if sv.shape[1] == X_shap.shape[1] + 1:
+        sv = sv[:, :-1]
+    return sv
 
+# Choose which class to show in global plots (example: predicted class for example row)
+class_for_global = pred_example_class
+sv_global = _get_shap_for_class(shap_values, class_for_global)
 
-# ==============================
-# 11) Save model + metadata
-# ==============================
-MODEL_NAME = "xgb_cls_randomsearch_weighted_no_te_v1"
-save_dir = os.path.join("models", "xgboost", "classification", MODEL_NAME)
-os.makedirs(save_dir, exist_ok=True)
+print(f"\nSHAP global (classe affichée): {class_for_global} - {class_names[class_for_global]}")
+shap.summary_plot(sv_global, X_shap, show=True)
+shap.summary_plot(sv_global, X_shap, plot_type="bar", show=True)
 
-joblib.dump(best_xgb_cls, os.path.join(save_dir, "model.joblib"))
+# Local SHAP for the example row
+X_one = X_example.copy()
+sv_one_all = explainer.shap_values(X_one)
 
-metadata = {
-    "model_name": MODEL_NAME,
-    "best_params": best_params,
-    "best_cv_f1_macro": float(best_cv_score),
-    "metrics_train": {
-        "accuracy": float(acc_train),
-        "balanced_accuracy": float(bacc_train),
-        "f1_macro": float(f1_train_macro),
-    },
-    "metrics_test": {
-        "accuracy": float(acc_test),
-        "balanced_accuracy": float(bacc_test),
-        "f1_macro": float(f1_test_macro),
-        "precision_macro": float(prec_test_macro),
-        "recall_macro": float(rec_test_macro),
-    },
-    "class_names": class_names,
-}
+# Extract SHAP for the predicted class
+if isinstance(sv_one_all, list):
+    sv_one = sv_one_all[pred_example_class]
+else:
+    sv_one = sv_one_all[:, :, pred_example_class]
 
-with open(os.path.join(save_dir, "metadata.json"), "w", encoding="utf-8") as f:
-    json.dump(metadata, f, ensure_ascii=False, indent=2)
+# Drop bias column if present
+if sv_one.shape[1] == X_one.shape[1] + 1:
+    sv_one = sv_one[:, :-1]
 
-# Save feature names used (important for consistent inference later)
-with open(os.path.join(save_dir, "feature_names.txt"), "w", encoding="utf-8") as f:
-    for col in X_train_xgb_cls.columns:
-        f.write(str(col) + "\n")
+# Waterfall plot (local explanation)
+base_value = explainer.expected_value
+if isinstance(base_value, (list, np.ndarray)):
+    base_value = base_value[pred_example_class]
 
-print("\nSaved to:", save_dir)
+shap.plots.waterfall(
+    shap.Explanation(
+        values=sv_one[0],
+        base_values=base_value,
+        data=X_one.iloc[0],
+        feature_names=X_one.columns
+    ),
+    max_display=20
+)
+plt.show()
 
 ```
