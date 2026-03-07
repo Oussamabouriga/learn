@@ -1,63 +1,51 @@
 ```
+
 # ==============================
-# SHAP global (FIXED for shape mismatch)
+# Class names (index -> label)
 # ==============================
+class_names = [
+    "Extrêmement mauvais (0–2)",
+    "Mauvais (3–6)",
+    "Neutre (7–8)",
+    "Bien (9)",
+    "Très bien (10)",
+]
 
-import numpy as np
-import shap
+num_classes = len(class_names)
 
-def _get_class_shap_matrix(shap_values, class_idx: int, X):
-    """
-    Returns a 2D matrix (n_samples, n_features) for the selected class.
-    Handles:
-      - shap_values as list (one array per class)
-      - shap_values as 3D array (n_samples, n_features, n_classes)
-      - extra bias/constant column (n_features + 1) -> drops last col
-    """
-    # Case 1: list-of-arrays (common in multiclass)
-    if isinstance(shap_values, list):
-        sv = shap_values[class_idx]  # (n_samples, n_features) or (n_samples, n_features+1)
-    else:
-        sv = np.asarray(shap_values)
-        # Case 2: 3D array
-        if sv.ndim == 3:
-            # could be (n_samples, n_features, n_classes)
-            if sv.shape[0] == X.shape[0] and sv.shape[1] in [X.shape[1], X.shape[1] + 1]:
-                sv = sv[:, :, class_idx]
-            # or (n_classes, n_samples, n_features)
-            elif sv.shape[1] == X.shape[0] and sv.shape[2] in [X.shape[1], X.shape[1] + 1]:
-                sv = sv[class_idx, :, :]
-            else:
-                raise ValueError(f"Unsupported SHAP shape {sv.shape} vs X {X.shape}")
-        else:
-            # Binary can sometimes be (n_samples, n_features) already
-            pass
+from sklearn.metrics import roc_curve
+import matplotlib.pyplot as plt
 
-    sv = np.asarray(sv)
+plt.figure(figsize=(7, 6))
 
-    # Drop extra bias column if present
-    if sv.shape[1] == X.shape[1] + 1:
-        sv = sv[:, :-1]
+for c in range(num_classes):
+    y_true_bin = (y_test_xgb_cls_base.values == c).astype(int)
+    fpr, tpr, _ = roc_curve(y_true_bin, proba_test[:, c])
+    plt.plot(fpr, tpr, label=class_names[c])
 
-    # Final safety check
-    if sv.shape[1] != X.shape[1]:
-        raise ValueError(f"SHAP shape {sv.shape} does not match X shape {X.shape}")
-
-    return sv
+plt.plot([0, 1], [0, 1], linestyle="--")
+plt.title("Courbes ROC (One-vs-Rest) — jeu de test")
+plt.xlabel("Taux de faux positifs (FPR)")
+plt.ylabel("Taux de vrais positifs (TPR)")
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
 
 
-# ---- Compute SHAP values (as you already do)
-# shap_values_global = explainer_cls.shap_values(X_shap)
 
-# Choose which class to display
-class_for_global = int(pred_example_class)  # or set manually: 0..4
 
-sv_class = _get_class_shap_matrix(shap_values_global, class_for_global, X_shap)
+from sklearn.metrics import confusion_matrix
+import pandas as pd
 
-print("\nSHAP global (summary) — shown for class:", class_for_global)
-shap.summary_plot(sv_class, X_shap, show=True)
+cm = confusion_matrix(y_test_xgb_cls_base, pred_test_cls, labels=list(range(num_classes)))
 
-print("\nSHAP global (bar) — shown for class:", class_for_global)
-shap.summary_plot(sv_class, X_shap, plot_type="bar", show=True)
+cm_df = pd.DataFrame(
+    cm,
+    index=[f"Réel — {name}" for name in class_names],
+    columns=[f"Prédit — {name}" for name in class_names],
+)
 
+print("\nMatrice de confusion (test)")
+display(cm_df)
 ```
