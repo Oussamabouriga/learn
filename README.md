@@ -1,329 +1,225 @@
 ```
-
 # ============================================================
-# XGBoost Regressor — WEIGHTED + BAYESIAN OPTIMIZATION (Optuna)
-# Multi-objective in CV:
-#   minimize: MAE_CV, RMSE_CV
-#   maximize: R2_CV, Accuracy@±tol_CV
+# XGBoost CLASSIFIER — BASELINE (NO target weighting, NO optimization)
+# - Train
+# - Metrics (train + test): Accuracy, Precision, Recall, F1 (macro + weighted), ROC-AUC (OvR)
+# - ROC Curve (OvR) for each class
+# - Confusion Matrix
+# - SHAP global + SHAP local (example row)
 #
-# Then:
-# - select ONE best trial from Pareto front (editable scoring)
-# - train final model on full train with sample_weight
-# - evaluate on train/test (MAE, RMSE, R2, Accuracy@±tol)
-# - SHAP global + SHAP local (example)
-# - save model to: models/xgboost/regression/<model_name>/
+# INPUTS expected (already prepared):
+#   X_train_xgb_cls_no_te, X_test_xgb_cls_no_te
+#   y_train_xgb_cls_no_te, y_test_xgb_cls_no_te     (class ids 0..4)
 #
-# Inputs expected (already prepared):
-#   X_train_xgboost_reg_w, X_test_xgboost_reg_w
-#   y_train_xgboost_reg_w, y_test_xgboost_reg_w
-#   sample_weight_train_xgboost_reg_w
-# Example row (already prepared/encoded):
-#   X_new_xgboost_reg_w OR X_new_encoded_no_te
-#
-# Requirements:
-#   pip install optuna shap xgboost scikit-learn
+# Example row:
+#   X_new_encoded_no_te (encoded features) OR X_new_xgboost_cls_no_te
 # ============================================================
 
-import os
-import json
-import time
 import numpy as np
 import pandas as pd
-
-from xgboost import XGBRegressor
-from sklearn.model_selection import KFold
-from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
-
-import optuna
-import shap
 import matplotlib.pyplot as plt
 
+from xgboost import XGBClassifier
 
-# ==============================
-# 1) Config (editable)
-# ==============================
-random_state = 42
-n_splits = 5
-n_trials = 60           # increase if you have compute
-tol = 1.0               # Accuracy@±tol
+from sklearn.metrics import (
+    accuracy_score,
+    precision_score,
+    recall_score,
+    f1_score,
+    roc_auc_score,
+    roc_curve,
+    confusion_matrix
+)
 
-clip_pred_to_0_10 = True
-
-# Pareto selection scoring (editable)
-# We want: low MAE, low RMSE, high R2, high Accuracy@tol
-w_mae = 1.0
-w_rmse = 1.0
-w_r2 = 1.0
-w_acc = 1.0
+import shap
 
 
 # ==============================
-# 2) Ensure correct dtypes
+# 1) Data
 # ==============================
-X_train_bo = X_train_xgboost_reg_w.copy().astype(float)
-X_test_bo  = X_test_xgboost_reg_w.copy().astype(float)
+X_train_xgb_cls_base = X_train_xgb_cls_no_te.copy().astype(float)
+X_test_xgb_cls_base  = X_test_xgb_cls_no_te.copy().astype(float)
 
-y_train_bo = pd.to_numeric(y_train_xgboost_reg_w, errors="coerce").astype(float)
-y_test_bo  = pd.to_numeric(y_test_xgboost_reg_w,  errors="coerce").astype(float)
+y_train_xgb_cls_base = pd.to_numeric(y_train_xgb_cls_no_te, errors="coerce").astype(int)
+y_test_xgb_cls_base  = pd.to_numeric(y_test_xgb_cls_no_te,  errors="coerce").astype(int)
 
-w_train_bo = np.asarray(sample_weight_train_xgboost_reg_w, dtype=float)
+num_classes = int(len(np.unique(y_train_xgb_cls_base)))
 
-# Drop missing target rows (if any)
-mask_tr = y_train_bo.notna()
-X_train_bo = X_train_bo.loc[mask_tr].copy()
-y_train_bo = y_train_bo.loc[mask_tr].copy()
-w_train_bo = w_train_bo[mask_tr.values]
-
-mask_te = y_test_bo.notna()
-X_test_bo = X_test_bo.loc[mask_te].copy()
-y_test_bo = y_test_bo.loc[mask_te].copy()
-
-cv = KFold(n_splits=n_splits, shuffle=True, random_state=random_state)
+print("Train:", X_train_xgb_cls_base.shape, y_train_xgb_cls_base.shape)
+print("Test :", X_test_xgb_cls_base.shape,  y_test_xgb_cls_base.shape)
+print("Classes:", sorted(np.unique(y_train_xgb_cls_base)))
 
 
 # ==============================
-# 3) Multi-objective objective (CV)
+# 2) Hyperparameters (dict)
 # ==============================
-def objective(trial):
-    params = {
-        "objective": "reg:squarederror",
-        "eval_metric": "rmse",
-        "tree_method": "hist",
-        "n_jobs": -1,
-        "random_state": random_state,
-        "verbosity": 0,
-        "missing": np.nan,
+xgb_cls_params_base = {
+    "objective": "multi:softprob",   # probability output for multi-class
+    "num_class": num_classes,
+    "eval_metric": "mlogloss",
 
-        # Tuned params (Bayesian)
-        "n_estimators": trial.suggest_int("n_estimators", 300, 1400),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
-        "max_depth": trial.suggest_int("max_depth", 3, 10),
-        "min_child_weight": trial.suggest_int("min_child_weight", 1, 15),
-        "gamma": trial.suggest_float("gamma", 0.0, 2.0),
-        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bytree": trial.suggest_float("colsample_bytree", 0.6, 1.0),
-        "reg_alpha": trial.suggest_float("reg_alpha", 0.0, 2.0),
-        "reg_lambda": trial.suggest_float("reg_lambda", 0.5, 10.0, log=True),
-    }
+    "n_estimators": 600,
+    "learning_rate": 0.05,
+    "max_depth": 6,
+    "min_child_weight": 3,
+    "gamma": 0.0,
 
-    maes, rmses, r2s, accs = [], [], [], []
+    "subsample": 0.8,
+    "colsample_bytree": 0.8,
 
-    for tr_idx, va_idx in cv.split(X_train_bo):
-        X_tr = X_train_bo.iloc[tr_idx]
-        y_tr = y_train_bo.iloc[tr_idx]
-        w_tr = w_train_bo[tr_idx]
+    "reg_alpha": 0.0,
+    "reg_lambda": 1.0,
 
-        X_va = X_train_bo.iloc[va_idx]
-        y_va = y_train_bo.iloc[va_idx]
-
-        model = XGBRegressor(**params)
-        model.fit(X_tr, y_tr, sample_weight=w_tr)
-
-        pred_va = model.predict(X_va)
-        if clip_pred_to_0_10:
-            pred_va = np.clip(pred_va, 0, 10)
-
-        mae = float(mean_absolute_error(y_va, pred_va))
-        rmse = float(np.sqrt(mean_squared_error(y_va, pred_va)))
-        r2 = float(r2_score(y_va, pred_va))
-        acc = float((np.abs(y_va.values - pred_va) <= tol).mean() * 100.0)
-
-        maes.append(mae)
-        rmses.append(rmse)
-        r2s.append(r2)
-        accs.append(acc)
-
-    mae_cv = float(np.mean(maes))
-    rmse_cv = float(np.mean(rmses))
-    r2_cv = float(np.mean(r2s))
-    acc_cv = float(np.mean(accs))
-
-    # Multi-objective: minimize MAE/RMSE, maximize R2/ACC
-    return mae_cv, rmse_cv, r2_cv, acc_cv
-
-
-study = optuna.create_study(directions=["minimize", "minimize", "maximize", "maximize"])
-study.optimize(objective, n_trials=n_trials)
-
-print("\nBayesian optimization finished")
-print("Pareto trials:", len(study.best_trials))
-
-
-# ==============================
-# 4) Pick ONE best trial from Pareto front (editable scoring)
-# ==============================
-best_trial = None
-best_score = -1e18
-
-for t in study.best_trials:
-    mae_cv, rmse_cv, r2_cv, acc_cv = t.values
-
-    # Higher score is better: we subtract errors and add good metrics
-    score = (-w_mae * mae_cv) + (-w_rmse * rmse_cv) + (w_r2 * r2_cv) + (w_acc * acc_cv)
-
-    if score > best_score:
-        best_score = score
-        best_trial = t
-
-print("\nSelected trial from Pareto front")
-print("Score:", best_score)
-print("CV values (MAE, RMSE, R2, Acc@tol):", best_trial.values)
-print("Best params:", best_trial.params)
-
-best_params = best_trial.params
-
-
-# ==============================
-# 5) Train final model on full train (weighted)
-# ==============================
-final_params = {
-    "objective": "reg:squarederror",
-    "eval_metric": "rmse",
     "tree_method": "hist",
     "n_jobs": -1,
-    "random_state": random_state,
+    "random_state": 42,
     "verbosity": 0,
-    "missing": np.nan,
-    **best_params
 }
 
-xgboost_reg_weighted_bayes = XGBRegressor(**final_params)
-xgboost_reg_weighted_bayes.fit(X_train_bo, y_train_bo, sample_weight=w_train_bo)
-
-print("\nFinal model trained")
+print("\nHyperparameters (baseline classifier):")
+display(pd.DataFrame([xgb_cls_params_base]).T.rename(columns={0: "value"}))
 
 
 # ==============================
-# 6) Evaluate train/test
+# 3) Train baseline classifier
 # ==============================
-pred_train = xgboost_reg_weighted_bayes.predict(X_train_bo)
-pred_test  = xgboost_reg_weighted_bayes.predict(X_test_bo)
+xgboost_cls_base = XGBClassifier(**xgb_cls_params_base)
+xgboost_cls_base.fit(X_train_xgb_cls_base, y_train_xgb_cls_base)
 
-if clip_pred_to_0_10:
-    pred_train = np.clip(pred_train, 0, 10)
-    pred_test  = np.clip(pred_test,  0, 10)
+print("\nModel trained (XGBoost classifier baseline)")
 
-def metrics_block(y_true, y_pred, tol):
-    mae = float(mean_absolute_error(y_true, y_pred))
-    rmse = float(np.sqrt(mean_squared_error(y_true, y_pred)))
-    r2 = float(r2_score(y_true, y_pred))
-    acc = float((np.abs(np.asarray(y_true) - np.asarray(y_pred)) <= tol).mean() * 100.0)
-    return mae, rmse, r2, acc
 
-mae_tr, rmse_tr, r2_tr, acc_tr = metrics_block(y_train_bo, pred_train, tol)
-mae_te, rmse_te, r2_te, acc_te = metrics_block(y_test_bo,  pred_test,  tol)
+# ==============================
+# 4) Predict + Probabilities
+# ==============================
+pred_train_cls = xgboost_cls_base.predict(X_train_xgb_cls_base)
+pred_test_cls  = xgboost_cls_base.predict(X_test_xgb_cls_base)
 
-metrics_bayes = pd.DataFrame({
-    "Metric": ["MAE", "RMSE", "R2", f"Accuracy@±{tol}"],
-    "Train_bayes": [mae_tr, rmse_tr, r2_tr, acc_tr],
-    "Test_bayes":  [mae_te, rmse_te, r2_te, acc_te],
-    "Better if": ["Lower", "Lower", "Higher", "Higher"]
+proba_train = xgboost_cls_base.predict_proba(X_train_xgb_cls_base)
+proba_test  = xgboost_cls_base.predict_proba(X_test_xgb_cls_base)
+
+
+# ==============================
+# 5) Metrics (train + test)
+# ==============================
+def cls_metrics(y_true, y_pred):
+    return {
+        "Accuracy": float(accuracy_score(y_true, y_pred)),
+        "Precision_macro": float(precision_score(y_true, y_pred, average="macro", zero_division=0)),
+        "Recall_macro": float(recall_score(y_true, y_pred, average="macro", zero_division=0)),
+        "F1_macro": float(f1_score(y_true, y_pred, average="macro", zero_division=0)),
+        "F1_weighted": float(f1_score(y_true, y_pred, average="weighted", zero_division=0)),
+    }
+
+train_metrics = cls_metrics(y_train_xgb_cls_base, pred_train_cls)
+test_metrics  = cls_metrics(y_test_xgb_cls_base,  pred_test_cls)
+
+metrics_table = pd.DataFrame({
+    "Metric": list(train_metrics.keys()),
+    "Train":  list(train_metrics.values()),
+    "Test":   list(test_metrics.values()),
+    "Better if": ["Higher"] * len(train_metrics)
 })
 
-print("\nBayesian best model metrics")
-display(metrics_bayes)
+print("\nClassification metrics (baseline)")
+display(metrics_table)
 
 
 # ==============================
-# 7) Predict example row + SHAP local
+# 6) ROC-AUC (multi-class OvR)
 # ==============================
-if "X_new_xgboost_reg_w" in globals():
-    X_one = X_new_xgboost_reg_w.copy()
+# ROC-AUC needs probabilities + one-vs-rest strategy
+roc_auc_train = float(roc_auc_score(y_train_xgb_cls_base, proba_train, multi_class="ovr"))
+roc_auc_test  = float(roc_auc_score(y_test_xgb_cls_base,  proba_test,  multi_class="ovr"))
+
+print("\nROC-AUC (OvR)")
+print("Train ROC-AUC:", roc_auc_train)
+print("Test  ROC-AUC:", roc_auc_test)
+
+
+# ==============================
+# 7) ROC curves (OvR) by class
+# ==============================
+# One-vs-rest: curve per class vs all others
+plt.figure(figsize=(7, 6))
+for c in range(num_classes):
+    y_true_bin = (y_test_xgb_cls_base.values == c).astype(int)
+    fpr, tpr, _ = roc_curve(y_true_bin, proba_test[:, c])
+    plt.plot(fpr, tpr, label=f"Classe {c}")
+
+plt.plot([0, 1], [0, 1], linestyle="--")
+plt.title("Courbes ROC (One-vs-Rest) — jeu de test")
+plt.xlabel("Taux de faux positifs (FPR)")
+plt.ylabel("Taux de vrais positifs (TPR)")
+plt.legend()
+plt.grid(True, alpha=0.3)
+plt.tight_layout()
+plt.show()
+
+
+# ==============================
+# 8) Confusion matrix (test)
+# ==============================
+cm = confusion_matrix(y_test_xgb_cls_base, pred_test_cls)
+cm_df = pd.DataFrame(cm, index=[f"Réel_{i}" for i in range(num_classes)], columns=[f"Prédit_{i}" for i in range(num_classes)])
+
+print("\nMatrice de confusion (test)")
+display(cm_df)
+
+
+# ==============================
+# 9) Example prediction (same encoded features as regression)
+# ==============================
+# If you already have a special encoded example, use it. Else use X_new_encoded_no_te.
+if "X_new_xgboost_cls_no_te" in globals():
+    X_one_cls = X_new_xgboost_cls_no_te.copy()
 else:
-    X_one = X_new_encoded_no_te.copy()
+    X_one_cls = X_new_encoded_no_te.copy()
 
-X_one = X_one.reindex(columns=X_train_bo.columns, fill_value=0).astype(float)
+X_one_cls = X_one_cls.reindex(columns=X_train_xgb_cls_base.columns, fill_value=0).astype(float)
 
-pred_example = float(xgboost_reg_weighted_bayes.predict(X_one)[0])
-if clip_pred_to_0_10:
-    pred_example = float(np.clip(pred_example, 0, 10))
+pred_example_class = int(xgboost_cls_base.predict(X_one_cls)[0])
+pred_example_proba = xgboost_cls_base.predict_proba(X_one_cls)[0]
 
-print("\nExample prediction (bayes):", pred_example)
+print("\nExample classification prediction")
+print("Predicted class id:", pred_example_class)
+print("Probabilities:", pred_example_proba)
 
-explainer = shap.TreeExplainer(xgboost_reg_weighted_bayes)
+
+# ==============================
+# 10) SHAP global + SHAP local (example)
+# ==============================
+# Note: for multi-class, SHAP returns a list/array per class.
+explainer_cls = shap.TreeExplainer(xgboost_cls_base)
 
 # Global SHAP on test sample
-X_shap = X_test_bo.sample(min(300, len(X_test_bo)), random_state=42)
-shap_values_global = explainer.shap_values(X_shap)
+X_shap = X_test_xgb_cls_base.sample(min(300, len(X_test_xgb_cls_base)), random_state=42)
 
-print("\nSHAP global (summary)")
-shap.summary_plot(shap_values_global, X_shap, show=True)
+shap_values_global = explainer_cls.shap_values(X_shap)
 
-print("\nSHAP global (bar)")
-shap.summary_plot(shap_values_global, X_shap, plot_type="bar", show=True)
+# Global summary for the predicted class (or choose a class index)
+class_for_global = pred_example_class  # you can change this
+print("\nSHAP global (summary) — shown for class:", class_for_global)
+shap.summary_plot(shap_values_global[class_for_global], X_shap, show=True)
 
-# Local SHAP for example
-shap_values_one = explainer.shap_values(X_one)
-base_value = explainer.expected_value
-pred_raw = float(xgboost_reg_weighted_bayes.predict(X_one)[0])
+print("\nSHAP global (bar) — shown for class:", class_for_global)
+shap.summary_plot(shap_values_global[class_for_global], X_shap, plot_type="bar", show=True)
 
-print("\nSHAP local numbers")
-print("E[f(X)] (baseline):", base_value)
-print("f(X) (prediction raw):", pred_raw)
+# Local SHAP for the example row (for its predicted class)
+shap_values_one = explainer_cls.shap_values(X_one_cls)
+
+print("\nSHAP local (waterfall) — class:", pred_example_class)
+base_value = explainer_cls.expected_value[pred_example_class] if isinstance(explainer_cls.expected_value, (list, np.ndarray)) else explainer_cls.expected_value
 
 shap.plots.waterfall(
     shap.Explanation(
-        values=shap_values_one[0],
+        values=shap_values_one[pred_example_class][0],
         base_values=base_value,
-        data=X_one.iloc[0],
-        feature_names=X_one.columns
+        data=X_one_cls.iloc[0],
+        feature_names=X_one_cls.columns
     ),
     max_display=20
 )
 plt.show()
 
-
-# ==============================
-# 8) Save model + metadata
-# ==============================
-timestamp = time.strftime("%Y%m%d_%H%M%S")
-model_name = f"xgb_reg_weighted_optuna_{timestamp}"
-save_dir = os.path.join("models", "xgboost", "regression", model_name)
-os.makedirs(save_dir, exist_ok=True)
-
-model_path = os.path.join(save_dir, "model.json")
-xgboost_reg_weighted_bayes.save_model(model_path)
-
-meta = {
-    "model_name": model_name,
-    "created_at": timestamp,
-    "model_type": "XGBRegressor",
-    "task": "regression",
-    "weighted_training": True,
-    "optimization": {
-        "method": "Optuna Bayesian (multi-objective)",
-        "n_trials": n_trials,
-        "cv": {"type": "KFold", "n_splits": n_splits, "shuffle": True, "random_state": random_state},
-        "objectives": {
-            "minimize": ["MAE_CV", "RMSE_CV"],
-            "maximize": ["R2_CV", f"Accuracy@±{tol}_CV"]
-        },
-        "pareto_selection_score": {
-            "formula": "score = -w_mae*MAE - w_rmse*RMSE + w_r2*R2 + w_acc*ACC",
-            "weights": {"w_mae": w_mae, "w_rmse": w_rmse, "w_r2": w_r2, "w_acc": w_acc}
-        },
-        "best_trial_values": {
-            "MAE_CV": float(best_trial.values[0]),
-            "RMSE_CV": float(best_trial.values[1]),
-            "R2_CV": float(best_trial.values[2]),
-            f"Accuracy@±{tol}_CV": float(best_trial.values[3]),
-        },
-        "best_params": best_params
-    },
-    "test_metrics": {
-        "MAE": mae_te,
-        "RMSE": rmse_te,
-        "R2": r2_te,
-        f"Accuracy@±{tol}": acc_te
-    },
-    "feature_count": int(X_train_bo.shape[1]),
-    "feature_columns": X_train_bo.columns.astype(str).tolist(),
-}
-
-meta_path = os.path.join(save_dir, "metadata.json")
-with open(meta_path, "w", encoding="utf-8") as f:
-    json.dump(meta, f, ensure_ascii=False, indent=2)
-
-print("\nModel saved in:", save_dir)
-print("Files:", model_path, meta_path)
 ```
