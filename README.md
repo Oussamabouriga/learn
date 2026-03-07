@@ -1,75 +1,100 @@
 ```
+# ============================================================
+# CATBOOST READY DATA (NO one-hot / NO frequency encoding)
+# Minimal transformations:
+# - force categorical columns to string + fill missing
+# - 0 -> NaN for selected numeric columns (business missing)
+# - log1p for selected numeric columns (delays/prices)
+# - keep numeric columns numeric
+# ============================================================
 
 import numpy as np
 import pandas as pd
 
-# ============================================================
-# Build ONE example row and apply the SAME transformations
-# (NO Target Encoding version)
-# Output: X_new_encoded_no_te aligned with X_train_encoded_no_te
-# ============================================================
+# -----------------------------
+# 1) Copy (keep originals safe)
+# -----------------------------
+X_train_cb = X_train_no_te.copy()
+X_test_cb  = X_test_no_te.copy()
 
-# 0) Your input
-test_row_no_te = [{
-    # "col1": value,
-    # "code_postal": 59700,
-}]
+# -----------------------------
+# 2) Choose categorical columns (YOU choose)
+#    CatBoost needs the list of cat column names
+# -----------------------------
+cat_cols_cb = [
+    "code_postal",   # forced categorical
+    # "operating_system",
+    # "marque",
+    # "model",
+    # ...
+]
+cat_cols_cb = [c for c in cat_cols_cb if c in X_train_cb.columns]
 
-X_new = pd.DataFrame(test_row_no_te).copy()
+print("Categorical columns for CatBoost:", cat_cols_cb)
 
-# 1) Make sure it contains all raw columns (missing ones -> NaN)
-#    (use X_train_no_te columns as reference because it’s "raw before encoding")
-for c in X_train_no_te.columns:
-    if c not in X_new.columns:
-        X_new[c] = np.nan
+# -----------------------------
+# 3) 0 -> NaN conversion (YOU choose numeric columns)
+#    Only for columns where 0 means "missing" in business logic
+# -----------------------------
+zero_to_nan_cols_cb = [
+    # "some_numeric_col",
+    # "some_delay_col",
+]
+zero_to_nan_cols_cb = [c for c in zero_to_nan_cols_cb if c in X_train_cb.columns]
 
-# Keep same order as training raw
-X_new = X_new[X_train_no_te.columns].copy()
+for c in zero_to_nan_cols_cb:
+    X_train_cb[c] = pd.to_numeric(X_train_cb[c], errors="coerce")
+    X_test_cb[c]  = pd.to_numeric(X_test_cb[c],  errors="coerce")
+    X_train_cb.loc[X_train_cb[c] == 0, c] = np.nan
+    X_test_cb.loc[X_test_cb[c] == 0, c]   = np.nan
 
-# 2) Force code_postal categorical (same as training)
-col_cp = "code_postal"
-if col_cp in X_new.columns:
-    X_new[col_cp] = X_new[col_cp].astype("string")
+print("0->NaN applied on:", zero_to_nan_cols_cb)
 
-# 3) 0 -> NaN conversion (if you have that list)
-#    (ONLY for columns where 0 means "missing" in your business logic)
-#    Make sure you defined `zero_to_nan_cols` earlier.
-if "zero_to_nan_cols" in globals():
-    for c in zero_to_nan_cols:
-        if c in X_new.columns:
-            X_new[c] = pd.to_numeric(X_new[c], errors="coerce")
-            X_new.loc[X_new[c] == 0, c] = np.nan
+# -----------------------------
+# 4) Force categorical columns to string + fill missing category
+# -----------------------------
+for c in cat_cols_cb:
+    X_train_cb[c] = X_train_cb[c].astype("string").fillna("__MISSING__")
+    X_test_cb[c]  = X_test_cb[c].astype("string").fillna("__MISSING__")
 
-# 4) Apply Frequency Encoding (using TRAIN-fitted freq_maps)
-#    (freq_cols & freq_maps must exist from your earlier step)
-X_new_fe = X_new.copy()
+# -----------------------------
+# 5) Ensure numeric columns are numeric
+# -----------------------------
+num_cols_cb = [c for c in X_train_cb.columns if c not in cat_cols_cb]
+for c in num_cols_cb:
+    X_train_cb[c] = pd.to_numeric(X_train_cb[c], errors="coerce")
+    X_test_cb[c]  = pd.to_numeric(X_test_cb[c],  errors="coerce")
 
-for c in freq_cols:
-    if c in X_new_fe.columns:
-        X_new_fe[c] = X_new_fe[c].map(freq_maps[c]).fillna(0).astype(float)
+# -----------------------------
+# 6) Optional: log1p transform (YOU choose) for skewed numeric columns
+#    Typical: delays/prices/amounts
+# -----------------------------
+log1p_cols_cb = [
+    # "delai_declaration",
+    # "delai_Sinistre",
+    # "montant",
+]
+log1p_cols_cb = [c for c in log1p_cols_cb if c in X_train_cb.columns and c in num_cols_cb]
 
-# 5) Apply One-Hot Encoding (same columns list as training)
-X_new_oh = pd.get_dummies(X_new_fe, columns=onehot_cols, dummy_na=True)
+for c in log1p_cols_cb:
+    # log1p requires >= 0
+    X_train_cb[c] = X_train_cb[c].clip(lower=0)
+    X_test_cb[c]  = X_test_cb[c].clip(lower=0)
+    X_train_cb[c] = np.log1p(X_train_cb[c])
+    X_test_cb[c]  = np.log1p(X_test_cb[c])
 
-# 6) Align to training encoded columns (important!)
-X_new_encoded_no_te = X_new_oh.reindex(columns=X_train_encoded_no_te.columns, fill_value=0)
+print("log1p applied on:", log1p_cols_cb)
 
-# 7) Apply log1p to the same columns (after encoding)
-#    log1p_cols must exist from earlier step
-for c in log1p_cols:
-    if c in X_new_encoded_no_te.columns:
-        X_new_encoded_no_te[c] = pd.to_numeric(X_new_encoded_no_te[c], errors="coerce").fillna(0)
-        X_new_encoded_no_te[c] = X_new_encoded_no_te[c].clip(lower=0)
-        X_new_encoded_no_te[c] = np.log1p(X_new_encoded_no_te[c])
+# -----------------------------
+# 7) Final checks
+# -----------------------------
+print("\nFinal shapes (CatBoost data):")
+print("X_train_cb:", X_train_cb.shape)
+print("X_test_cb :", X_test_cb.shape)
 
-# 8) Apply the SAME scaler (fitted on train) on the SAME columns
-#    scaler and scale_cols must exist from earlier step
-if "scaler" in globals() and "scale_cols" in globals() and len(scale_cols) > 0:
-    X_new_encoded_no_te[scale_cols] = scaler.transform(X_new_encoded_no_te[scale_cols])
+non_num = X_train_cb.select_dtypes(exclude=[np.number, "string", "object"]).columns.tolist()
+print("Weird dtypes (should be empty):", non_num)
 
-# 9) Final safety for XGBoost/CatBoost
-X_new_encoded_no_te = X_new_encoded_no_te.astype(float)
-
-print("✅ X_new_encoded_no_te shape:", X_new_encoded_no_te.shape)
-print("✅ Same columns as train:", X_new_encoded_no_te.columns.equals(X_train_encoded_no_te.columns))
+# X_train_cb, X_test_cb are ready for CatBoost
+# cat_cols_cb is your cat_features list
 ```
