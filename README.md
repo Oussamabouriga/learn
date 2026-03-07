@@ -1,12 +1,12 @@
 ```
 # ============================================================
-# XGBoost Classification — RANDOM SEARCH (no target encoding)
-# Uses SAME DATA you provided:
+# XGBoost Classification — SMALL GRID SEARCH (no target encoding)
+# Uses SAME DATA:
 #   X_train_xgb_cls_no_te, X_test_xgb_cls_no_te
 #   y_train_xgb_cls_no_te, y_test_xgb_cls_no_te
 #
 # Includes:
-# - RandomizedSearchCV (with CV)
+# - GridSearchCV (small grid + CV)
 # - Train best model
 # - Metrics (train/test): accuracy, f1 (macro/weighted), precision/recall, logloss
 # - ROC curves OvR with class names
@@ -23,7 +23,7 @@ import matplotlib.pyplot as plt
 
 from xgboost import XGBClassifier
 
-from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from sklearn.metrics import (
     accuracy_score, f1_score, precision_score, recall_score,
     classification_report, confusion_matrix,
@@ -31,13 +31,11 @@ from sklearn.metrics import (
 )
 
 import joblib
-
-# SHAP
 import shap
 
 
 # ==============================
-# 1) Data (as you requested)
+# 1) Data (same as before)
 # ==============================
 X_train_xgb_cls_base = X_train_xgb_cls_no_te.copy().astype(float)
 X_test_xgb_cls_base  = X_test_xgb_cls_no_te.copy().astype(float)
@@ -54,7 +52,6 @@ print("Classes:", sorted(np.unique(y_train_xgb_cls_base)))
 
 # ==============================
 # 2) Class names (edit if you want)
-#    Must match your class indices 0..4
 # ==============================
 class_names = [
     "Extrêmement mauvais (0–2)",
@@ -63,13 +60,12 @@ class_names = [
     "Bien (9)",
     "Très bien (10)",
 ]
-# safety: if different number of classes
 if len(class_names) != num_classes:
     class_names = [f"Classe {i}" for i in range(num_classes)]
 
 
 # ==============================
-# 3) Base model (fixed parts)
+# 3) Base model
 # ==============================
 xgb_cls_base = XGBClassifier(
     objective="multi:softprob",
@@ -82,69 +78,59 @@ xgb_cls_base = XGBClassifier(
 
 
 # ==============================
-# 4) Random Search space (compute-friendly)
+# 4) SMALL grid (compute-friendly)
+#    Keep it small: (2-3 values per param)
 # ==============================
-param_distributions = {
-    "n_estimators": [200, 400, 600, 900, 1200],
-    "learning_rate": [0.01, 0.02, 0.03, 0.05, 0.08, 0.1],
-    "max_depth": [3, 4, 5, 6, 7, 8],
-    "min_child_weight": [1, 2, 3, 5, 7, 10],
-    "gamma": [0.0, 0.1, 0.3, 0.5, 1.0],
-    "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
-    "colsample_bytree": [0.6, 0.7, 0.8, 0.9, 1.0],
-    "reg_alpha": [0.0, 1e-4, 1e-3, 1e-2, 0.1, 1.0],
-    "reg_lambda": [0.5, 1.0, 2.0, 5.0, 10.0],
+param_grid_small = {
+    "n_estimators": [400, 800],
+    "learning_rate": [0.03, 0.08],
+    "max_depth": [4, 6],
+    "min_child_weight": [1, 3],
+    "subsample": [0.8, 1.0],
+    "colsample_bytree": [0.8, 1.0],
+    "reg_lambda": [1.0, 5.0],
+    # keep gamma small in this grid (optional)
+    "gamma": [0.0, 0.3],
 }
 
-
-# ==============================
-# 5) CV setup
-# ==============================
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
-
-# Scoring: choose one primary metric for the search
-# (You can change to "f1_macro" if you prefer)
+# Primary metric for grid search (you can change)
 scoring_main = "f1_macro"
 
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-# ==============================
-# 6) RandomizedSearchCV
-# ==============================
-random_search = RandomizedSearchCV(
+grid_search = GridSearchCV(
     estimator=xgb_cls_base,
-    param_distributions=param_distributions,
-    n_iter=40,                 # adjust 20..80 depending on compute
+    param_grid=param_grid_small,
     scoring=scoring_main,
     cv=cv,
     verbose=2,
-    random_state=42,
     n_jobs=-1,
     refit=True,
     return_train_score=True
 )
 
-random_search.fit(X_train_xgb_cls_base, y_train_xgb_cls_base)
+grid_search.fit(X_train_xgb_cls_base, y_train_xgb_cls_base)
 
-best_model_xgb_cls_random = random_search.best_estimator_
-best_params_xgb_cls_random = random_search.best_params_
-best_cv_score_xgb_cls_random = random_search.best_score_
+best_model_xgb_cls_grid = grid_search.best_estimator_
+best_params_xgb_cls_grid = grid_search.best_params_
+best_cv_score_xgb_cls_grid = grid_search.best_score_
 
-print("\nBest CV score (", scoring_main, "):", best_cv_score_xgb_cls_random)
-print("Best params:", best_params_xgb_cls_random)
-
-
-# ==============================
-# 7) Predictions + probabilities
-# ==============================
-pred_train_cls = best_model_xgb_cls_random.predict(X_train_xgb_cls_base)
-pred_test_cls  = best_model_xgb_cls_random.predict(X_test_xgb_cls_base)
-
-proba_train = best_model_xgb_cls_random.predict_proba(X_train_xgb_cls_base)
-proba_test  = best_model_xgb_cls_random.predict_proba(X_test_xgb_cls_base)
+print("\nBest CV score (", scoring_main, "):", best_cv_score_xgb_cls_grid)
+print("Best params:", best_params_xgb_cls_grid)
 
 
 # ==============================
-# 8) Metrics (train/test)
+# 5) Predictions + probabilities
+# ==============================
+pred_train_cls = best_model_xgb_cls_grid.predict(X_train_xgb_cls_base)
+pred_test_cls  = best_model_xgb_cls_grid.predict(X_test_xgb_cls_base)
+
+proba_train = best_model_xgb_cls_grid.predict_proba(X_train_xgb_cls_base)
+proba_test  = best_model_xgb_cls_grid.predict_proba(X_test_xgb_cls_base)
+
+
+# ==============================
+# 6) Metrics (train/test)
 # ==============================
 def classification_metrics_table(y_true, y_pred, y_proba, split_name="Train"):
     acc = accuracy_score(y_true, y_pred)
@@ -167,7 +153,7 @@ m_train = classification_metrics_table(y_train_xgb_cls_base, pred_train_cls, pro
 m_test  = classification_metrics_table(y_test_xgb_cls_base,  pred_test_cls,  proba_test,  "Test")
 
 metrics_df = pd.DataFrame([m_train, m_test])
-print("\nMetrics (classification) — Random Search best")
+print("\nMetrics (classification) — Small Grid Search best")
 display(metrics_df)
 
 print("\nRapport de classification (test):")
@@ -178,7 +164,7 @@ print(classification_report(
 
 
 # ==============================
-# 9) ROC curves OvR (test) with class names
+# 7) ROC curves OvR (test) with class names
 # ==============================
 plt.figure(figsize=(7, 6))
 for c in range(num_classes):
@@ -188,7 +174,7 @@ for c in range(num_classes):
     plt.plot(fpr, tpr, label=f"{class_names[c]} (AUC={roc_auc:.3f})")
 
 plt.plot([0, 1], [0, 1], linestyle="--")
-plt.title("Courbes ROC (One-vs-Rest) — jeu de test (Random Search)")
+plt.title("Courbes ROC (One-vs-Rest) — jeu de test (Grid Search)")
 plt.xlabel("Taux de faux positifs (FPR)")
 plt.ylabel("Taux de vrais positifs (TPR)")
 plt.legend()
@@ -198,7 +184,7 @@ plt.show()
 
 
 # ==============================
-# 10) Confusion matrix (test) with class names
+# 8) Confusion matrix (test) with class names
 # ==============================
 cm = confusion_matrix(y_test_xgb_cls_base, pred_test_cls, labels=list(range(num_classes)))
 cm_df = pd.DataFrame(
@@ -212,35 +198,26 @@ display(cm_df)
 
 
 # ==============================
-# 11) SHAP — global + local (example row)
-#     NOTE: For multi-class, shap_values can be:
-#       - list of arrays [n_classes] each (n_samples, n_features)
-#       - or array (n_samples, n_features, n_classes)
-#     We'll normalize it safely.
+# 9) SHAP — global + local (example row)
 # ==============================
-# Sample from test for global SHAP (faster)
 sample_size = min(300, len(X_test_xgb_cls_base))
 X_shap = X_test_xgb_cls_base.sample(sample_size, random_state=42).copy()
 
-explainer = shap.TreeExplainer(best_model_xgb_cls_random)
+explainer = shap.TreeExplainer(best_model_xgb_cls_grid)
 shap_values = explainer.shap_values(X_shap)
 
-# Normalize to list-of-classes format: shap_values_list[class] -> (n_samples, n_features)
+# Normalize to list-of-classes format
 if isinstance(shap_values, list):
     shap_values_list = shap_values
 else:
-    # could be (n_samples, n_features, n_classes)
     if shap_values.ndim == 3:
         shap_values_list = [shap_values[:, :, k] for k in range(shap_values.shape[2])]
     else:
-        # fallback (binary sometimes returns (n_samples, n_features))
         shap_values_list = [shap_values]
 
-# Pick a class to show global importance (example: predicted class of example or class 0)
 class_for_global = 0
 print("\nSHAP global (summary) — classe:", class_for_global, "-", class_names[class_for_global])
 
-# If SHAP adds an extra bias column, trim it safely
 sv = shap_values_list[class_for_global]
 if sv.shape[1] == X_shap.shape[1] + 1:
     sv = sv[:, :-1]
@@ -250,13 +227,10 @@ shap.summary_plot(sv, X_shap, plot_type="bar", show=True)
 
 
 # ==============================
-# 12) SHAP local (example row)
-#     Use your prepared example row:
-#       X_example_xgb_cls_no_te (must be encoded like X_train_xgb_cls_no_te)
-# If you have a different variable name, replace it here.
+# 10) SHAP local (example row)
+#     Requires your example DF variable:
+#       X_example_xgb_cls_no_te  (same columns as X_train_xgb_cls_base)
 # ==============================
-# ---- choose your example dataframe variable here
-# Example must be a DataFrame with same columns as X_train_xgb_cls_base
 X_example = None
 try:
     X_example = X_example_xgb_cls_no_te.copy().astype(float)  # <-- change if needed
@@ -266,10 +240,9 @@ except Exception:
 if X_example is None:
     print("\nNo example row dataframe found. Please set: X_example = <your_example_df>.")
 else:
-    # Align columns just in case
     X_example = X_example.reindex(columns=X_train_xgb_cls_base.columns, fill_value=0.0)
 
-    proba_example = best_model_xgb_cls_random.predict_proba(X_example)[0]
+    proba_example = best_model_xgb_cls_grid.predict_proba(X_example)[0]
     pred_example_class = int(np.argmax(proba_example))
 
     print("\nExample prediction:")
@@ -280,7 +253,6 @@ else:
 
     shap_one = explainer.shap_values(X_example)
 
-    # normalize one-row shap to list-of-classes
     if isinstance(shap_one, list):
         shap_one_list = shap_one
     else:
@@ -290,11 +262,9 @@ else:
             shap_one_list = [shap_one]
 
     sv_one = shap_one_list[pred_example_class]
-    # remove bias column if present
     if sv_one.shape[1] == X_example.shape[1] + 1:
         sv_one = sv_one[:, :-1]
 
-    # Waterfall for predicted class
     base_val = explainer.expected_value
     if isinstance(base_val, (list, np.ndarray)):
         base_val = base_val[pred_example_class]
@@ -312,20 +282,19 @@ else:
 
 
 # ==============================
-# 13) Save model + metadata
+# 11) Save model + metadata
 # ==============================
-model_name = "xgb_cls_randomsearch_no_te_v1"
+model_name = "xgb_cls_gridsearch_no_te_v1"
 save_dir = os.path.join("models", "xgboost", "classification", model_name)
 os.makedirs(save_dir, exist_ok=True)
 
-joblib.dump(best_model_xgb_cls_random, os.path.join(save_dir, "model.joblib"))
+joblib.dump(best_model_xgb_cls_grid, os.path.join(save_dir, "model.joblib"))
 
 with open(os.path.join(save_dir, "best_params.json"), "w") as f:
-    json.dump(best_params_xgb_cls_random, f, indent=2)
+    json.dump(best_params_xgb_cls_grid, f, indent=2)
 
 metrics_df.to_csv(os.path.join(save_dir, "metrics_train_test.csv"), index=False)
 cm_df.to_csv(os.path.join(save_dir, "confusion_matrix_test.csv"), index=True)
 
 print("\nModel saved to:", save_dir)
-
 ```
