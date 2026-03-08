@@ -1,6 +1,7 @@
 ```
+
 # ============================================================
-# CATBOOST CLASSIFICATION — RANDOM SEARCH (NO TE)
+# CATBOOST CLASSIFICATION — SMALL GRID SEARCH (NO TE)
 # + Multi-metrics CV (refit on F1_weighted)
 # + Train/Test metrics
 # + Confusion matrix + ROC OvR (avec noms de classes)
@@ -20,7 +21,7 @@ import matplotlib.pyplot as plt
 
 from catboost import CatBoostClassifier
 
-from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
+from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from sklearn.metrics import (
     accuracy_score, f1_score, precision_score, recall_score,
     confusion_matrix, classification_report,
@@ -52,70 +53,66 @@ print("Cat cols:", cat_cols_cb)
 
 
 # ==============================
-# 2) Random Search — Param space (compute-friendly)
+# 2) Small Grid Search (compute-friendly)
 # IMPORTANT:
-# - On reste en bootstrap_type='Bernoulli' pour pouvoir utiliser subsample sans erreur.
-# - CatBoost gère les cat_features via fit(cat_features=...)
+# - On reste en bootstrap_type='Bernoulli' pour pouvoir utiliser subsample.
+# - Si tu veux bootstrap_type='Bayesian', enlève subsample (sinon erreur).
 # ==============================
 cat_base = CatBoostClassifier(
     loss_function="MultiClass",
     eval_metric="MultiClass",
     random_seed=42,
     allow_writing_files=False,
-    verbose=False,              # silence pendant la recherche
-    bootstrap_type="Bernoulli"  # compatible avec subsample
+    verbose=False,
+    bootstrap_type="Bernoulli"
 )
 
-param_distributions = {
-    "iterations": [600, 900, 1200, 1600, 2000],
-    "learning_rate": [0.01, 0.02, 0.03, 0.05, 0.08, 0.1],
-    "depth": [4, 5, 6, 7, 8, 9, 10],
-    "l2_leaf_reg": [1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0],
-    "random_strength": [0.0, 0.3, 0.7, 1.0, 1.5, 2.0],
-    "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
-    "colsample_bylevel": [0.6, 0.7, 0.8, 0.9, 1.0],
+# Petite grille: garde-la volontairement limitée (sinon explosion de calcul)
+param_grid = {
+    "iterations": [900, 1400],
+    "learning_rate": [0.03, 0.06],
+    "depth": [6, 8],
+    "l2_leaf_reg": [3.0, 8.0],
+    "subsample": [0.8, 1.0],
+    "colsample_bylevel": [0.8, 1.0],
+    "random_strength": [0.0, 1.0],
 }
 
-# CV stratifié (classification)
 cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
 
-# Multi-métriques pendant CV
 scoring = {
     "acc": "accuracy",
     "f1_macro": "f1_macro",
     "f1_weighted": "f1_weighted"
 }
 
-random_search = RandomizedSearchCV(
+grid_search = GridSearchCV(
     estimator=cat_base,
-    param_distributions=param_distributions,
-    n_iter=35,                 # ajuste 20..80 selon ton budget
+    param_grid=param_grid,
     scoring=scoring,
-    refit="f1_weighted",       # on choisit le "meilleur" modèle selon F1_weighted
+    refit="f1_weighted",   # change to "acc" if you prefer accuracy
     cv=cv,
     verbose=2,
     n_jobs=-1,
-    random_state=42,
     return_train_score=True
 )
 
-print("\n--- Random Search: lancement ---")
-random_search.fit(X_train_cat_cls, y_train_cat_cls, cat_features=cat_cols_cb)
+print("\n--- Grid Search: lancement ---")
+grid_search.fit(X_train_cat_cls, y_train_cat_cls, cat_features=cat_cols_cb)
 
-best_cat_cls = random_search.best_estimator_
-best_params = random_search.best_params_
-best_cv = random_search.best_score_
+best_cat_cls = grid_search.best_estimator_
+best_params = grid_search.best_params_
+best_cv = grid_search.best_score_
 
-print("\n--- Random Search terminé ---")
+print("\n--- Grid Search terminé ---")
 print("Best CV (F1_weighted):", best_cv)
 print("Best params:", best_params)
 
 
 # ==============================
-# 3) Refit propre sur TRAIN avec early stopping (optionnel mais recommandé)
-# (RandomizedSearchCV refit déjà, mais on refit ici avec eval_set + early_stopping)
+# 3) Refit propre sur TRAIN avec early stopping (optionnel)
 # ==============================
-best_cat_cls.set_params(verbose=200)  # affiche training
+best_cat_cls.set_params(verbose=200)
 
 best_cat_cls.fit(
     X_train_cat_cls,
@@ -126,7 +123,7 @@ best_cat_cls.fit(
     early_stopping_rounds=150
 )
 
-model_name = "catboost_cls_random_search_no_te_v1"
+model_name = "catboost_cls_grid_search_no_te_v1"
 print("Model trained:", model_name)
 
 
@@ -156,7 +153,7 @@ metrics_df = pd.DataFrame([
     {"Jeu": "Test",  **m_test},
 ])
 
-print("\n=== Métriques (CatBoost classification — Random Search) ===")
+print("\n=== Métriques (CatBoost classification — Grid Search) ===")
 display(metrics_df)
 
 print("\n=== Rapport détaillé (test) ===")
@@ -287,16 +284,13 @@ def get_shap_matrix_for_class(shap_values_obj, class_index, X_ref):
         else:
             sv = arr
     sv = np.array(sv)
-
-    # Fix bias/offset si présent
     if sv.shape[1] == X_ref.shape[1] + 1:
         sv = sv[:, :-1]
     return sv
 
-# Global SHAP: on affiche la classe prédite par l’exemple
+# Global SHAP: classe affichée = classe prédite sur l’exemple
 class_for_global = pred_example
 idx_global = classes_sorted.index(class_for_global)
-
 sv_global = get_shap_matrix_for_class(shap_values, idx_global, X_shap)
 
 print("\nSHAP global — classe affichée:", class_names_fr.get(class_for_global, str(class_for_global)))
