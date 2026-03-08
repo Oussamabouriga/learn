@@ -1,36 +1,53 @@
 ```
 
-# ==============================
-# 9) SHAP (FIX robuste CatBoost multi-classes)
-# ==============================
-import shap
+# ============================================================
+# RANDOM FOREST CLASSIFICATION — SHAP FIX (GLOBAL + EXEMPLE) + SAVE
+# ============================================================
 import numpy as np
 import pandas as pd
+import shap
 import matplotlib.pyplot as plt
+import os, json
+from datetime import datetime
+import joblib
 
-# --- échantillon pour SHAP
-sample_size = min(300, len(X_test_cat_cls))
-X_shap = X_test_cat_cls.sample(sample_size, random_state=42).copy()
+# -----------------------------
+# 0) Choisis ton modèle RF + tes données numériques
+# -----------------------------
+rf_cls_model = rf_cls_model
 
-explainer = shap.TreeExplainer(cat_cls_random_best)
+# IMPORTANT: X_test_rf doit être NUMÉRIQUE (one-hot / freq déjà fait)
+X_test_rf = X_test_rf.copy().astype(float)   # adapte le nom: X_test_xgb_cls_base etc.
+X_train_rf = X_train_rf.copy().astype(float)
 
-# CatBoost multiclass -> shap_values = list[array] (une matrice par classe)
+# Exemple déjà encodé (doit matcher les colonnes RF)
+X_one_rf = X_one_rf.copy().astype(float)     # adapte le nom si besoin
+
+# -----------------------------
+# 1) SHAP global
+# -----------------------------
+sample_size = min(300, len(X_test_rf))
+X_shap = X_test_rf.sample(sample_size, random_state=42).copy()
+
+explainer = shap.TreeExplainer(rf_cls_model)
 shap_values = explainer.shap_values(X_shap)
 
-# ----- choisir une classe pour le global (ex: 4)
-class_for_global = 4 if num_classes > 4 else 0
-print("\nSHAP global — classe:", class_for_global, "|", class_names_fr.get(class_for_global, class_for_global))
+n_classes = len(rf_cls_model.classes_)
+class_for_global = 4 if n_classes > 4 else 0
 
-sv = shap_values[class_for_global]
+if isinstance(shap_values, list):
+    sv = np.asarray(shap_values[class_for_global])
+else:
+    sv = np.asarray(shap_values)
+    if sv.ndim == 3:
+        sv = sv[:, :, class_for_global]
 
-# sv doit être (n_samples, n_features)
-sv = np.asarray(sv)
+print("RF X_shap:", X_shap.shape, "| RF sv:", sv.shape)
 
-# FIX 1: parfois une colonne bias en plus -> on enlève la dernière
+# FIX bias column if exists
 if sv.shape[1] == X_shap.shape[1] + 1:
     sv = sv[:, :-1]
 
-# FIX 2: sécurité: si encore mismatch, on tronque au min (rare, mais safe)
 if sv.shape[1] != X_shap.shape[1]:
     m = min(sv.shape[1], X_shap.shape[1])
     sv = sv[:, :m]
@@ -38,91 +55,60 @@ if sv.shape[1] != X_shap.shape[1]:
 else:
     X_shap_plot = X_shap
 
-# Global beeswarm + bar
 shap.summary_plot(sv, X_shap_plot, show=True)
 shap.summary_plot(sv, X_shap_plot, plot_type="bar", show=True)
 
+# -----------------------------
+# 2) SHAP local (exemple)
+# -----------------------------
+pred_class = int(rf_cls_model.predict(X_one_rf)[0])
+print("Classe prédite (exemple RF):", pred_class)
 
-# ==============================
-# SHAP local — sur ton exemple
-# ==============================
-X_one = pd.DataFrame(test_row_cat_cls_no_te).copy()
+shap_one = explainer.shap_values(X_one_rf)
 
-# align colonnes
-for c in X_train_cat_cls.columns:
-    if c not in X_one.columns:
-        X_one[c] = np.nan
-X_one = X_one[X_train_cat_cls.columns].copy()
+if isinstance(shap_one, list):
+    sv_one = np.asarray(shap_one[pred_class])
+else:
+    sv_one = np.asarray(shap_one)
+    if sv_one.ndim == 3:
+        sv_one = sv_one[:, :, pred_class]
 
-# même cleanup que dataset (cat -> str + missing label)
-X_one = X_one.astype(object).where(pd.notna(X_one), np.nan)
-
-for c in cat_cols_cb:
-    if c in X_one.columns:
-        X_one[c] = X_one[c].astype(str)
-        X_one.loc[X_one[c].isin(["nan", "None", "<NA>"]), c] = "__MISSING__"
-
-for c in num_cols:
-    X_one[c] = pd.to_numeric(X_one[c], errors="coerce")
-
-pred_example_class = int(cat_cls_random_best.predict(X_one).reshape(-1)[0])
-print("\n=== EXEMPLE ===")
-print("Classe prédite:", pred_example_class, "|", class_names_fr.get(pred_example_class, pred_example_class))
-
-# shap values pour l'exemple (list par classe)
-shap_one = explainer.shap_values(X_one)
-sv_one = np.asarray(shap_one[pred_example_class])
-
-# sv_one doit être (1, n_features)
-if sv_one.shape[1] == X_one.shape[1] + 1:
+if sv_one.shape[1] == X_one_rf.shape[1] + 1:
     sv_one = sv_one[:, :-1]
 
-# base value pour la classe prédite
 expected = explainer.expected_value
-base_val = expected[pred_example_class] if isinstance(expected, (list, np.ndarray)) else expected
+base_val = expected[pred_class] if isinstance(expected, (list, np.ndarray)) else expected
 
-# Waterfall clair (top 20)
 shap.plots.waterfall(
     shap.Explanation(
         values=sv_one[0],
         base_values=base_val,
-        data=X_one.iloc[0],
-        feature_names=X_one.columns
+        data=X_one_rf.iloc[0],
+        feature_names=X_one_rf.columns
     ),
     max_display=20
 )
 plt.show()
 
-
-# ==============================
-# 10) Save model (CatBoost)
-# ==============================
-import os
-import json
-from datetime import datetime
-
-model_name = "catboost_cls_random_search_no_te_v1"
-save_dir = f"models/catboost/classification/{model_name}"
+# -----------------------------
+# 3) SAVE RF model
+# -----------------------------
+model_name = "random_forest_cls_v1"
+save_dir = f"models/random_forest/classification/{model_name}"
 os.makedirs(save_dir, exist_ok=True)
 
-# 1) modèle
-model_path = os.path.join(save_dir, "model.cbm")
-cat_cls_random_best.save_model(model_path)
+path_model = os.path.join(save_dir, "model.joblib")
+joblib.dump(rf_cls_model, path_model)
 
-# 2) métadonnées (optionnel mais utile)
 meta = {
     "model_name": model_name,
     "created_at": datetime.now().isoformat(),
-    "num_classes": int(num_classes),
-    "class_names_fr": class_names_fr,
-    "cat_features": list(cat_cols_cb),
-    "best_params": best_params,           # si tu as Random Search
-    "best_cv_score_f1_weighted": float(best_cv),
+    "classes": [int(x) for x in rf_cls_model.classes_],
+    "columns": list(X_train_rf.columns),
 }
-
 with open(os.path.join(save_dir, "meta.json"), "w", encoding="utf-8") as f:
     json.dump(meta, f, ensure_ascii=False, indent=2)
 
-print("Model saved to:", model_path)
-print("Meta saved to:", os.path.join(save_dir, "meta.json"))
+print("Saved:", path_model)
+print("Saved:", os.path.join(save_dir, "meta.json"))
 ```
