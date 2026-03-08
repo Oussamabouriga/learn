@@ -1,11 +1,9 @@
 ```
 
-
 # ============================================================
-# CATBOOST CLASSIFICATION — SMALL GRID SEARCH (NO TE)
-# + Multi-metrics CV (refit on F1_weighted)
+# CATBOOST CLASSIFICATION — BAYESIAN OPTIMIZATION (Optuna)
 # + Train/Test metrics
-# + Confusion matrix + ROC OvR (avec noms de classes)
+# + Confusion matrix + ROC OvR (noms des classes)
 # + Exemple (1 ligne) -> prédiction + proba
 # + SHAP global + SHAP local (exemple)
 #
@@ -14,6 +12,9 @@
 #   - y_train_cat_cls_no_te, y_test_cat_cls_no_te
 #   - cat_cols_cb  (liste des colonnes catégorielles CatBoost)
 #   - class_names_fr (dict: id -> nom FR)
+#
+# Requirements:
+#   pip install optuna shap catboost
 # ============================================================
 
 import numpy as np
@@ -21,15 +22,15 @@ import pandas as pd
 import matplotlib.pyplot as plt
 
 from catboost import CatBoostClassifier
-
-from sklearn.model_selection import GridSearchCV, StratifiedKFold
 from sklearn.metrics import (
     accuracy_score, f1_score, precision_score, recall_score,
     confusion_matrix, classification_report,
     roc_curve, auc
 )
 from sklearn.preprocessing import label_binarize
+from sklearn.model_selection import StratifiedKFold
 
+import optuna
 import shap
 
 
@@ -54,88 +55,138 @@ print("Cat cols:", cat_cols_cb)
 
 
 # ==============================
-# 2) Small Grid Search (compute-friendly)
-# IMPORTANT:
-# - On reste en bootstrap_type='Bernoulli' pour pouvoir utiliser subsample.
-# - Si tu veux bootstrap_type='Bayesian', enlève subsample (sinon erreur).
+# 2) Optuna config
 # ==============================
-cat_base = CatBoostClassifier(
-    loss_function="MultiClass",
-    eval_metric="MultiClass",
-    random_seed=42,
-    allow_writing_files=False,
-    verbose=False,
-    bootstrap_type="Bernoulli"
-)
+n_splits = 5
+n_trials = 40          # 20..120 selon budget
+random_state = 42
 
-# Petite grille: garde-la volontairement limitée (sinon explosion de calcul)
-param_grid = {
-    "iterations": [900, 1400],
-    "learning_rate": [0.03, 0.06],
-    "depth": [6, 8],
-    "l2_leaf_reg": [3.0, 8.0],
-    "subsample": [0.8, 1.0],
-    "colsample_bylevel": [0.8, 1.0],
-    "random_strength": [0.0, 1.0],
-}
+cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
 
-cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+# NOTE IMPORTANT (CatBoost):
+# - bootstrap_type="Bayesian" NE SUPPORTE PAS "subsample"
+# - Si tu veux subsample, utilise bootstrap_type="Bernoulli"
+#
+# Ici on fait un vrai "Bayesian" bootstrap => PAS de subsample dans params.
 
-scoring = {
-    "acc": "accuracy",
-    "f1_macro": "f1_macro",
-    "f1_weighted": "f1_weighted"
-}
 
-grid_search = GridSearchCV(
-    estimator=cat_base,
-    param_grid=param_grid,
-    scoring=scoring,
-    refit="f1_weighted",   # change to "acc" if you prefer accuracy
-    cv=cv,
-    verbose=2,
-    n_jobs=-1,
-    return_train_score=True
-)
+def _score_for_optuna(y_true, y_pred):
+    """
+    Score unique à maximiser (multi-objectifs simplifié):
+    - on veut: F1_weighted haut, accuracy haut
+    - et pénaliser: erreurs macro (F1_macro) faibles
+    """
+    acc = accuracy_score(y_true, y_pred)
+    f1w = f1_score(y_true, y_pred, average="weighted")
+    f1m = f1_score(y_true, y_pred, average="macro")
 
-print("\n--- Grid Search: lancement ---")
-grid_search.fit(X_train_cat_cls, y_train_cat_cls, cat_features=cat_cols_cb)
+    # Score principal (tu peux ajuster les poids)
+    score = 0.55 * f1w + 0.35 * acc + 0.10 * f1m
+    return float(score), float(acc), float(f1w), float(f1m)
 
-best_cat_cls = grid_search.best_estimator_
-best_params = grid_search.best_params_
-best_cv = grid_search.best_score_
 
-print("\n--- Grid Search terminé ---")
-print("Best CV (F1_weighted):", best_cv)
+def objective(trial):
+    params = {
+        # Core
+        "loss_function": "MultiClass",
+        "eval_metric": "MultiClass",
+        "random_seed": random_state,
+        "allow_writing_files": False,
+        "verbose": False,
+
+        # Bayesian bootstrap (pas de subsample)
+        "bootstrap_type": "Bayesian",
+        "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 5.0),
+
+        # Main tunables
+        "iterations": trial.suggest_int("iterations", 600, 2400),
+        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.2, log=True),
+        "depth": trial.suggest_int("depth", 4, 10),
+        "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 20.0, log=True),
+
+        # Regularization / randomness
+        "random_strength": trial.suggest_float("random_strength", 0.0, 2.0),
+        "rsm": trial.suggest_float("rsm", 0.6, 1.0),  # colsample-like in CatBoost
+
+        # Tree growth
+        "grow_policy": trial.suggest_categorical("grow_policy", ["SymmetricTree", "Lossguide"]),
+    }
+
+    fold_scores = []
+
+    for tr_idx, va_idx in cv.split(X_train_cat_cls, y_train_cat_cls):
+        X_tr = X_train_cat_cls.iloc[tr_idx]
+        y_tr = y_train_cat_cls[tr_idx]
+
+        X_va = X_train_cat_cls.iloc[va_idx]
+        y_va = y_train_cat_cls[va_idx]
+
+        model = CatBoostClassifier(**params)
+
+        model.fit(
+            X_tr, y_tr,
+            cat_features=cat_cols_cb,
+            eval_set=(X_va, y_va),
+            use_best_model=True,
+            early_stopping_rounds=150
+        )
+
+        pred_va = model.predict(X_va).astype(int).reshape(-1)
+        score, acc, f1w, f1m = _score_for_optuna(y_va, pred_va)
+
+        fold_scores.append(score)
+
+    return float(np.mean(fold_scores))  # maximize
+
+
+study = optuna.create_study(direction="maximize")
+study.optimize(objective, n_trials=n_trials)
+
+best_params = study.best_params
+best_cv_score = study.best_value
+
+print("\n--- Optuna terminé ---")
+print("Best CV score (custom):", best_cv_score)
 print("Best params:", best_params)
 
 
 # ==============================
-# 3) Refit propre sur TRAIN avec early stopping (optionnel)
+# 3) Train final best model (sur TRAIN complet)
 # ==============================
-best_cat_cls.set_params(verbose=200)
+final_params = {
+    "loss_function": "MultiClass",
+    "eval_metric": "MultiClass",
+    "random_seed": random_state,
+    "allow_writing_files": False,
+    "verbose": 200,
 
-best_cat_cls.fit(
-    X_train_cat_cls,
-    y_train_cat_cls,
+    # IMPORTANT: doit matcher l'objective
+    "bootstrap_type": "Bayesian",
+    **best_params
+}
+
+cat_cls_bayes = CatBoostClassifier(**final_params)
+
+cat_cls_bayes.fit(
+    X_train_cat_cls, y_train_cat_cls,
     cat_features=cat_cols_cb,
     eval_set=(X_test_cat_cls, y_test_cat_cls),
     use_best_model=True,
     early_stopping_rounds=150
 )
 
-model_name = "catboost_cls_grid_search_no_te_v1"
+model_name = "catboost_cls_optuna_bayesian_no_te_v1"
 print("Model trained:", model_name)
 
 
 # ==============================
-# 4) PRED + METRICS (train/test)
+# 4) Predict + Metrics (train/test)
 # ==============================
-pred_train = best_cat_cls.predict(X_train_cat_cls).astype(int).reshape(-1)
-pred_test  = best_cat_cls.predict(X_test_cat_cls).astype(int).reshape(-1)
+pred_train = cat_cls_bayes.predict(X_train_cat_cls).astype(int).reshape(-1)
+pred_test  = cat_cls_bayes.predict(X_test_cat_cls).astype(int).reshape(-1)
 
-proba_train = best_cat_cls.predict_proba(X_train_cat_cls)
-proba_test  = best_cat_cls.predict_proba(X_test_cat_cls)
+proba_train = cat_cls_bayes.predict_proba(X_train_cat_cls)
+proba_test  = cat_cls_bayes.predict_proba(X_test_cat_cls)
 
 def metrics_cls(y_true, y_pred):
     return {
@@ -154,7 +205,7 @@ metrics_df = pd.DataFrame([
     {"Jeu": "Test",  **m_test},
 ])
 
-print("\n=== Métriques (CatBoost classification — Grid Search) ===")
+print("\n=== Métriques (CatBoost classification — Optuna Bayesian) ===")
 display(metrics_df)
 
 print("\n=== Rapport détaillé (test) ===")
@@ -168,7 +219,7 @@ print(classification_report(
 
 
 # ==============================
-# 5) MATRICE DE CONFUSION (test) avec noms
+# 5) Confusion matrix (test) avec noms
 # ==============================
 cm = confusion_matrix(y_test_cat_cls, pred_test, labels=classes_sorted)
 cm_df = pd.DataFrame(
@@ -181,7 +232,7 @@ display(cm_df)
 
 
 # ==============================
-# 6) ROC OvR (test) avec noms des classes
+# 6) ROC OvR (test) avec noms
 # ==============================
 y_test_bin = label_binarize(y_test_cat_cls, classes=classes_sorted)
 
@@ -205,7 +256,6 @@ plt.show()
 # 7) EXEMPLE (1 ligne) -> prédiction + proba
 # ============================================================
 test_row_cat_cls_no_te = [{
-    # adapte ton exemple ici
     "PARCOURS_FINAL": "HORS_APPLE_EE",
     "PARCOURS_INITIAL": "HORS_APPLE_EE",
     "code_postal": "59700",
@@ -218,28 +268,28 @@ test_row_cat_cls_no_te = [{
 
 X_one = pd.DataFrame(test_row_cat_cls_no_te).copy()
 
-# Ajouter colonnes manquantes + aligner ordre
+# ajouter colonnes manquantes + aligner ordre
 for c in X_train_cat_cls.columns:
     if c not in X_one.columns:
         X_one[c] = np.nan
 X_one = X_one[X_train_cat_cls.columns].copy()
 
-# Nettoyage CatBoost (critique)
+# nettoyage CatBoost (critique)
 X_one = X_one.astype(object).where(pd.notna(X_one), np.nan)
 
-# Cat columns -> string + normalize missing-like
+# cat cols -> string + normalize missing-like
 for c in cat_cols_cb:
     if c in X_one.columns:
         X_one[c] = X_one[c].astype(str)
         X_one.loc[X_one[c].isin(["nan", "None", "<NA>"]), c] = "__MISSING__"
 
-# Non-cat -> numeric
+# non-cat -> numeric
 num_cols = [c for c in X_train_cat_cls.columns if c not in cat_cols_cb]
 for c in num_cols:
     X_one[c] = pd.to_numeric(X_one[c], errors="coerce")
 
-pred_example = int(best_cat_cls.predict(X_one).reshape(-1)[0])
-proba_example = best_cat_cls.predict_proba(X_one).reshape(-1)
+pred_example = int(cat_cls_bayes.predict(X_one).reshape(-1)[0])
+proba_example = cat_cls_bayes.predict_proba(X_one).reshape(-1)
 
 print("\n=== EXEMPLE (classification) ===")
 print("Classe prédite (id):", pred_example)
@@ -270,7 +320,7 @@ for c in cat_cols_cb:
 for c in num_cols:
     X_shap[c] = pd.to_numeric(X_shap[c], errors="coerce")
 
-explainer = shap.TreeExplainer(best_cat_cls)
+explainer = shap.TreeExplainer(cat_cls_bayes)
 shap_values = explainer.shap_values(X_shap)
 
 def get_shap_matrix_for_class(shap_values_obj, class_index, X_ref):
@@ -289,7 +339,7 @@ def get_shap_matrix_for_class(shap_values_obj, class_index, X_ref):
         sv = sv[:, :-1]
     return sv
 
-# Global SHAP: classe affichée = classe prédite sur l’exemple
+# Global SHAP: on affiche la classe prédite sur l’exemple
 class_for_global = pred_example
 idx_global = classes_sorted.index(class_for_global)
 sv_global = get_shap_matrix_for_class(shap_values, idx_global, X_shap)
