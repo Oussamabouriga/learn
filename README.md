@@ -1,6 +1,7 @@
 ```
 # ============================================================
 # NOTEBOOK: GATED MODEL (XGBoost Classifier -> XGBoost Regressors)
+# FIXED: meta.json may NOT contain feature_cols -> we recover feature names from XGBoost model
 # (NO SHAP PLOTS) -> SHAP AS TABLE + send SHAP + data + context to Ollama LLM
 #
 # PREREQUISITES (outside python):
@@ -102,6 +103,7 @@ example_row_raw = {
 }
 
 # ---- H) Encoding config (must match training)
+# If you didn't actually use one of these methods in training, remove it here too.
 onehot_cols = ["PARCOURS_FINAL", "PARCOURS_INITIAL", "operating_system"]
 freq_cols   = ["marque", "model", "garantie", "list_prest"]
 force_categorical_cols = ["code_postal"]
@@ -125,30 +127,13 @@ if not GATED_MODEL_DIR.is_dir():
     raise FileNotFoundError(f"GATED_MODEL_DIR not found: {GATED_MODEL_DIR}")
 if not XGB_CLS_FILE.is_file():
     raise FileNotFoundError(f"Missing classifier file: {XGB_CLS_FILE}")
-if not META_FILE.is_file():
-    raise FileNotFoundError(f"Missing meta.json file: {META_FILE}")
 if not REG_DIR.is_dir():
     raise FileNotFoundError(f"Missing regressors folder: {REG_DIR}")
 
-with open(META_FILE, "r", encoding="utf-8") as f:
-    meta = json.load(f)
-
-feature_cols = (
-    meta.get("feature_cols")
-    or meta.get("train_columns")
-    or meta.get("X_train_columns")
-    or meta.get("encoded_feature_names")
-)
-if feature_cols is None:
-    raise ValueError("meta.json must contain feature columns list (feature_cols/train_columns/...)")
-
-freq_maps = meta.get("freq_maps", {})
-missing_freq = [c for c in freq_cols if c not in freq_maps]
-if len(missing_freq) > 0:
-    raise ValueError(
-        f"meta.json is missing freq_maps for columns: {missing_freq}. "
-        "You must save freq_maps used in training to meta.json."
-    )
+meta = {}
+if META_FILE.is_file():
+    with open(META_FILE, "r", encoding="utf-8") as f:
+        meta = json.load(f)
 
 # classifier
 xgb_cls_gated = xgb.XGBClassifier()
@@ -167,7 +152,40 @@ for class_id in sorted(class_ranges.keys()):
 print("\nLoaded:")
 print("- classifier:", XGB_CLS_FILE.name)
 print("- regressors:", len(xgb_reg_by_class))
-print("- encoded feature cols:", len(feature_cols))
+
+# ============================================================
+# 1bis) FEATURE NAMES FIX (NO meta.json needed)
+# We recover encoded feature columns from the classifier model itself.
+# ============================================================
+
+def _get_feature_names_from_xgb(model) -> list:
+    booster = model.get_booster()
+    names = booster.feature_names
+    if names is None:
+        # fallback: infer from f0..fN using num_features()
+        n = booster.num_features()
+        names = [f"f{i}" for i in range(n)]
+    return list(names)
+
+feature_cols = _get_feature_names_from_xgb(xgb_cls_gated)
+print("- encoded feature cols (from model):", len(feature_cols))
+
+# ============================================================
+# 1ter) FREQ MAPS
+# If meta doesn't have them, we fallback to empty maps (safe but less accurate)
+# IMPORTANT: If you used freq encoding during training, you SHOULD store freq_maps in meta.json.
+# ============================================================
+
+freq_maps = meta.get("freq_maps", {})
+if not isinstance(freq_maps, dict):
+    freq_maps = {}
+
+missing_freq = [c for c in freq_cols if c not in freq_maps]
+if len(missing_freq) > 0:
+    print("\n[WARNING] meta.json has no freq_maps for:", missing_freq)
+    print("          => fallback to 0 for unseen categories in these columns.")
+    for c in missing_freq:
+        freq_maps[c] = {}  # empty -> will map everything to 0
 
 
 # ============================================================
@@ -206,8 +224,8 @@ def prepare_example_encoded(
 
     # frequency encoding
     for c in freq_cols:
+        mapping = freq_maps.get(c, {})
         if c in X_new.columns:
-            mapping = freq_maps.get(c, {})
             X_new[c] = X_new[c].map(mapping).fillna(0).astype(float)
         else:
             X_new[c] = 0.0
@@ -227,6 +245,8 @@ def prepare_example_encoded(
         X_new_oh = X_new_oh.drop(columns=extra)
 
     X_new_oh = X_new_oh[feature_cols].copy()
+
+    # IMPORTANT: XGBoost models saved in JSON may expect float
     X_new_oh = X_new_oh.astype(float)
     return X_new_oh
 
@@ -243,7 +263,7 @@ X_example = prepare_example_encoded(
 )
 
 print("\nExample encoded shape:", X_example.shape)
-print("Columns match train  :", list(X_example.columns) == list(feature_cols))
+print("Columns match model  :", list(X_example.columns) == list(feature_cols))
 
 
 # ============================================================
@@ -256,11 +276,12 @@ def gated_predict(X_encoded: pd.DataFrame, cls_model, reg_models_by_class: dict)
 
     pred_values = []
     for i, cid in enumerate(pred_class):
-        reg = reg_models_by_class[int(cid)]
+        cid = int(cid)
+        reg = reg_models_by_class[cid]
         v = float(reg.predict(X_encoded.iloc[[i]])[0])
 
         v = float(np.clip(v, PRED_MIN, PRED_MAX))
-        low, high, _ = class_ranges[int(cid)]
+        low, high, _ = class_ranges[cid]
         v = float(np.clip(v, low, high))
 
         pred_values.append(v)
@@ -303,20 +324,19 @@ def shap_top_table_from_vector(feature_names, feature_values, shap_vector, top_k
     return df
 
 
-# Background for SHAP: try meta["shap_background"]["data"] else fallback to zeros
-X_bg = None
-if isinstance(meta.get("shap_background"), dict):
-    bg_data = meta["shap_background"].get("data")
-    if bg_data is not None:
-        X_bg = pd.DataFrame(bg_data, columns=feature_cols).astype(float)
-if X_bg is None:
-    X_bg = pd.DataFrame(np.zeros((200, len(feature_cols))), columns=feature_cols).astype(float)
+# Background for SHAP
+# We use a neutral background of zeros with correct columns.
+# (If you saved a real background during training, you can load it from meta.json and replace this.)
+X_bg = pd.DataFrame(np.zeros((200, len(feature_cols))), columns=feature_cols).astype(float)
 
-# ---- A) Classifier SHAP (use predicted class for local + global table)
+# ---- A) Classifier SHAP
 explainer_cls = shap.TreeExplainer(xgb_cls_gated, data=X_bg, feature_perturbation="interventional")
 
-# local (example)
 sv_one_cls = explainer_cls.shap_values(X_example)
+
+# SHAP output can be:
+# - list of arrays (one per class) shape (n_samples, n_features)
+# - or ndarray shape (n_samples, n_features, n_classes)
 if isinstance(sv_one_cls, list):
     sv_cls_local = sv_one_cls[pred_class_id][0]
 else:
@@ -332,7 +352,7 @@ cls_local_table = shap_top_table_from_vector(
 print("\n--- SHAP (Classification) : TOP facteurs pour la classe prédite ---")
 print(tabulate(cls_local_table, headers="keys", tablefmt="github", showindex=False))
 
-# global importance table (mean abs SHAP on background, for predicted class)
+# global importance
 sv_bg_cls = explainer_cls.shap_values(X_bg)
 if isinstance(sv_bg_cls, list):
     sv_cls_global = sv_bg_cls[pred_class_id]
@@ -375,13 +395,12 @@ print(tabulate(reg_global_table, headers="keys", tablefmt="github", showindex=Fa
 
 
 # ============================================================
-# 5) Build LLM prompt payload (includes input data + encoded + shap tables)
+# 5) Build LLM payload (input + prediction + SHAP tables)
 # ============================================================
 
-# Helpful: show only non-zero encoded features for the example (reduce noise)
 encoded_nonzero = X_example.iloc[0]
 encoded_nonzero = encoded_nonzero[encoded_nonzero != 0.0].sort_values(ascending=False)
-encoded_used_compact = encoded_nonzero.head(80).to_dict()  # limit size
+encoded_used_compact = encoded_nonzero.head(80).to_dict()
 
 payload = {
     "contexte_projet": PROJECT_CONTEXT_TEXT,
@@ -416,7 +435,7 @@ payload = {
         ],
         "contraintes": [
             "Ne pas citer SHAP, ni termes trop techniques",
-            "Ne pas citer des noms de colonnes: parler en termes métier (délais, complétude, décisions, etc.)"
+            "Ne pas citer les noms exacts des variables/colonnes: parler en termes métier (délais, manque d'info, décisions, pièces manquantes, etc.)"
         ]
     }
 }
@@ -427,7 +446,7 @@ payload = {
 # ============================================================
 
 client = OpenAI(
-    base_url=OLLAMA_BASE_URL,
+    base_url="http://localhost:11434/v1",
     api_key="ollama"
 )
 
