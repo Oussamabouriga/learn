@@ -1,10 +1,11 @@
 ```
 # ============================================================
-# CATBOOST CLASSIFICATION — BASELINE (NO TE)
+# CATBOOST CLASSIFICATION — RANDOM SEARCH (NO TE)
+# + Multi-metrics CV (refit on F1_weighted)
 # + Train/Test metrics
 # + Confusion matrix + ROC OvR (avec noms de classes)
 # + Exemple (1 ligne) -> prédiction + proba
-# + SHAP global (summary + bar) + SHAP local (waterfall sur l’exemple)
+# + SHAP global + SHAP local (exemple)
 #
 # DATA à utiliser (déjà préparées chez toi) :
 #   - X_train_cat_cls_no_te, X_test_cat_cls_no_te
@@ -17,11 +18,13 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
-from catboost import CatBoostClassifier, Pool
+from catboost import CatBoostClassifier
 
+from sklearn.model_selection import RandomizedSearchCV, StratifiedKFold
 from sklearn.metrics import (
     accuracy_score, f1_score, precision_score, recall_score,
-    confusion_matrix, classification_report, roc_curve, auc
+    confusion_matrix, classification_report,
+    roc_curve, auc
 )
 from sklearn.preprocessing import label_binarize
 
@@ -39,8 +42,6 @@ y_test_cat_cls  = pd.to_numeric(pd.Series(y_test_cat_cls_no_te),  errors="coerce
 
 classes_sorted = sorted(np.unique(y_train_cat_cls))
 num_classes = len(classes_sorted)
-
-# Liste des noms FR dans l’ordre des ids
 class_labels_fr = [class_names_fr[c] for c in classes_sorted]
 
 print("Train:", X_train_cat_cls.shape, y_train_cat_cls.shape)
@@ -51,71 +52,92 @@ print("Cat cols:", cat_cols_cb)
 
 
 # ==============================
-# 2) POOLS (CatBoost)
+# 2) Random Search — Param space (compute-friendly)
+# IMPORTANT:
+# - On reste en bootstrap_type='Bernoulli' pour pouvoir utiliser subsample sans erreur.
+# - CatBoost gère les cat_features via fit(cat_features=...)
 # ==============================
-train_pool_cat_cls = Pool(
-    X_train_cat_cls,
-    y_train_cat_cls,
-    cat_features=cat_cols_cb
+cat_base = CatBoostClassifier(
+    loss_function="MultiClass",
+    eval_metric="MultiClass",
+    random_seed=42,
+    allow_writing_files=False,
+    verbose=False,              # silence pendant la recherche
+    bootstrap_type="Bernoulli"  # compatible avec subsample
 )
 
-test_pool_cat_cls = Pool(
-    X_test_cat_cls,
-    y_test_cat_cls,
-    cat_features=cat_cols_cb
-)
-
-
-# ==============================
-# 3) HYPERPARAMS (baseline)
-# Fix: bootstrap_type compatible avec subsample
-# ==============================
-cat_params_cls_base = {
-    "loss_function": "MultiClass",
-    "eval_metric": "MultiClass",
-    "random_seed": 42,
-    "allow_writing_files": False,
-    "verbose": 200,
-
-    "iterations": 1500,
-    "learning_rate": 0.05,
-    "depth": 6,
-    "l2_leaf_reg": 3.0,
-
-    # IMPORTANT: Bernoulli permet subsample (Bayesian ne le permet pas)
-    "bootstrap_type": "Bernoulli",
-    "subsample": 0.8,
-    "colsample_bylevel": 0.8,
-
-    "random_strength": 0.5
+param_distributions = {
+    "iterations": [600, 900, 1200, 1600, 2000],
+    "learning_rate": [0.01, 0.02, 0.03, 0.05, 0.08, 0.1],
+    "depth": [4, 5, 6, 7, 8, 9, 10],
+    "l2_leaf_reg": [1.0, 2.0, 3.0, 5.0, 8.0, 12.0, 20.0],
+    "random_strength": [0.0, 0.3, 0.7, 1.0, 1.5, 2.0],
+    "subsample": [0.6, 0.7, 0.8, 0.9, 1.0],
+    "colsample_bylevel": [0.6, 0.7, 0.8, 0.9, 1.0],
 }
 
-model_name = "catboost_cls_baseline_no_te_v1"
+# CV stratifié (classification)
+cv = StratifiedKFold(n_splits=5, shuffle=True, random_state=42)
+
+# Multi-métriques pendant CV
+scoring = {
+    "acc": "accuracy",
+    "f1_macro": "f1_macro",
+    "f1_weighted": "f1_weighted"
+}
+
+random_search = RandomizedSearchCV(
+    estimator=cat_base,
+    param_distributions=param_distributions,
+    n_iter=35,                 # ajuste 20..80 selon ton budget
+    scoring=scoring,
+    refit="f1_weighted",       # on choisit le "meilleur" modèle selon F1_weighted
+    cv=cv,
+    verbose=2,
+    n_jobs=-1,
+    random_state=42,
+    return_train_score=True
+)
+
+print("\n--- Random Search: lancement ---")
+random_search.fit(X_train_cat_cls, y_train_cat_cls, cat_features=cat_cols_cb)
+
+best_cat_cls = random_search.best_estimator_
+best_params = random_search.best_params_
+best_cv = random_search.best_score_
+
+print("\n--- Random Search terminé ---")
+print("Best CV (F1_weighted):", best_cv)
+print("Best params:", best_params)
 
 
 # ==============================
-# 4) TRAIN
+# 3) Refit propre sur TRAIN avec early stopping (optionnel mais recommandé)
+# (RandomizedSearchCV refit déjà, mais on refit ici avec eval_set + early_stopping)
 # ==============================
-cat_cls = CatBoostClassifier(**cat_params_cls_base)
+best_cat_cls.set_params(verbose=200)  # affiche training
 
-cat_cls.fit(
-    train_pool_cat_cls,
-    eval_set=test_pool_cat_cls,
+best_cat_cls.fit(
+    X_train_cat_cls,
+    y_train_cat_cls,
+    cat_features=cat_cols_cb,
+    eval_set=(X_test_cat_cls, y_test_cat_cls),
     use_best_model=True,
     early_stopping_rounds=150
 )
 
+model_name = "catboost_cls_random_search_no_te_v1"
 print("Model trained:", model_name)
 
 
 # ==============================
-# 5) PRED + METRICS (train/test)
+# 4) PRED + METRICS (train/test)
 # ==============================
-pred_train = cat_cls.predict(X_train_cat_cls).astype(int).reshape(-1)
-pred_test  = cat_cls.predict(X_test_cat_cls).astype(int).reshape(-1)
+pred_train = best_cat_cls.predict(X_train_cat_cls).astype(int).reshape(-1)
+pred_test  = best_cat_cls.predict(X_test_cat_cls).astype(int).reshape(-1)
 
-proba_train = cat_cls.predict_proba(X_train_cat_cls)
-proba_test  = cat_cls.predict_proba(X_test_cat_cls)
+proba_train = best_cat_cls.predict_proba(X_train_cat_cls)
+proba_test  = best_cat_cls.predict_proba(X_test_cat_cls)
 
 def metrics_cls(y_true, y_pred):
     return {
@@ -134,7 +156,7 @@ metrics_df = pd.DataFrame([
     {"Jeu": "Test",  **m_test},
 ])
 
-print("\n=== Métriques (CatBoost classification) ===")
+print("\n=== Métriques (CatBoost classification — Random Search) ===")
 display(metrics_df)
 
 print("\n=== Rapport détaillé (test) ===")
@@ -148,7 +170,7 @@ print(classification_report(
 
 
 # ==============================
-# 6) MATRICE DE CONFUSION (test) avec noms
+# 5) MATRICE DE CONFUSION (test) avec noms
 # ==============================
 cm = confusion_matrix(y_test_cat_cls, pred_test, labels=classes_sorted)
 cm_df = pd.DataFrame(
@@ -161,7 +183,7 @@ display(cm_df)
 
 
 # ==============================
-# 7) ROC OvR (test) avec noms des classes
+# 6) ROC OvR (test) avec noms des classes
 # ==============================
 y_test_bin = label_binarize(y_test_cat_cls, classes=classes_sorted)
 
@@ -182,15 +204,10 @@ plt.show()
 
 
 # ============================================================
-# 8) EXEMPLE (1 ligne) -> prédiction + proba
-#    -> on aligne exactement sur les colonnes de X_train_cat_cls
+# 7) EXEMPLE (1 ligne) -> prédiction + proba
 # ============================================================
-
-# IMPORTANT:
-# - Mets ici ton exemple complet si tu veux.
-# - Si tu n’as pas une colonne, on la crée en NaN (comme d’habitude).
 test_row_cat_cls_no_te = [{
-    # exemples (à adapter)
+    # adapte ton exemple ici
     "PARCOURS_FINAL": "HORS_APPLE_EE",
     "PARCOURS_INITIAL": "HORS_APPLE_EE",
     "code_postal": "59700",
@@ -199,42 +216,37 @@ test_row_cat_cls_no_te = [{
     "model": "Pixel 7 Pro ",
     "garantie": "Dommage",
     "list_prest": "ADVANCED_SWAP",
-    # ... ajoute le reste si tu veux
 }]
 
 X_one = pd.DataFrame(test_row_cat_cls_no_te).copy()
 
-# Ajouter les colonnes manquantes + aligner l’ordre
+# Ajouter colonnes manquantes + aligner ordre
 for c in X_train_cat_cls.columns:
     if c not in X_one.columns:
         X_one[c] = np.nan
 X_one = X_one[X_train_cat_cls.columns].copy()
 
-# Nettoyage CatBoost (critique) :
-# 1) pd.NA -> np.nan
+# Nettoyage CatBoost (critique)
 X_one = X_one.astype(object).where(pd.notna(X_one), np.nan)
 
-# 2) colonnes catégorielles -> string + normaliser les "manquants"
+# Cat columns -> string + normalize missing-like
 for c in cat_cols_cb:
     if c in X_one.columns:
         X_one[c] = X_one[c].astype(str)
         X_one.loc[X_one[c].isin(["nan", "None", "<NA>"]), c] = "__MISSING__"
 
-# 3) colonnes non-catégorielles -> numeric
+# Non-cat -> numeric
 num_cols = [c for c in X_train_cat_cls.columns if c not in cat_cols_cb]
 for c in num_cols:
-    if c in X_one.columns:
-        X_one[c] = pd.to_numeric(X_one[c], errors="coerce")
+    X_one[c] = pd.to_numeric(X_one[c], errors="coerce")
 
-# Prédiction exemple
-pred_example = int(cat_cls.predict(X_one).reshape(-1)[0])
-proba_example = cat_cls.predict_proba(X_one).reshape(-1)
+pred_example = int(best_cat_cls.predict(X_one).reshape(-1)[0])
+proba_example = best_cat_cls.predict_proba(X_one).reshape(-1)
 
 print("\n=== EXEMPLE (classification) ===")
 print("Classe prédite (id):", pred_example)
 print("Classe prédite (nom):", class_names_fr.get(pred_example, str(pred_example)))
 
-# Afficher proba par classe avec noms
 proba_df = pd.DataFrame({
     "class_id": classes_sorted,
     "class_name_fr": [class_names_fr[c] for c in classes_sorted],
@@ -245,87 +257,68 @@ display(proba_df)
 
 
 # ============================================================
-# 9) SHAP (CatBoostClassifier)
-# - Global: summary + bar (sur une classe choisie)
-# - Local: waterfall sur l’exemple (classe prédite)
+# 8) SHAP (Global + Local)
 # ============================================================
 
-# Petit échantillon pour accélérer SHAP (modifiable)
 sample_size = min(300, len(X_test_cat_cls))
 X_shap = X_test_cat_cls.sample(sample_size, random_state=42).copy()
 
-# Même nettoyage CatBoost sur X_shap (au cas où)
+# même nettoyage que X_one
 X_shap = X_shap.astype(object).where(pd.notna(X_shap), np.nan)
 for c in cat_cols_cb:
     if c in X_shap.columns:
         X_shap[c] = X_shap[c].astype(str)
         X_shap.loc[X_shap[c].isin(["nan", "None", "<NA>"]), c] = "__MISSING__"
 for c in num_cols:
-    if c in X_shap.columns:
-        X_shap[c] = pd.to_numeric(X_shap[c], errors="coerce")
+    X_shap[c] = pd.to_numeric(X_shap[c], errors="coerce")
 
-# Explainer
-explainer = shap.TreeExplainer(cat_cls)
+explainer = shap.TreeExplainer(best_cat_cls)
 shap_values = explainer.shap_values(X_shap)
 
-# shap_values peut être:
-# - list (une matrice par classe)
-# - ou array 3D selon versions
-def get_shap_matrix_for_class(shap_values_obj, class_index):
+def get_shap_matrix_for_class(shap_values_obj, class_index, X_ref):
     if isinstance(shap_values_obj, list):
         sv = shap_values_obj[class_index]
     else:
-        # si array 3D: (n_samples, n_features, n_classes) ou (n_classes, n_samples, n_features)
         arr = np.array(shap_values_obj)
-        if arr.ndim == 3 and arr.shape[2] == num_classes:
+        if arr.ndim == 3 and arr.shape[2] == len(classes_sorted):
             sv = arr[:, :, class_index]
-        elif arr.ndim == 3 and arr.shape[0] == num_classes:
+        elif arr.ndim == 3 and arr.shape[0] == len(classes_sorted):
             sv = arr[class_index, :, :]
         else:
             sv = arr
     sv = np.array(sv)
 
-    # Fix classique: parfois CatBoost/SHAP ajoute une colonne “bias”
-    if sv.shape[1] == X_shap.shape[1] + 1:
+    # Fix bias/offset si présent
+    if sv.shape[1] == X_ref.shape[1] + 1:
         sv = sv[:, :-1]
     return sv
 
-# Choisir la classe à afficher globalement
-# (par défaut: la classe prédite par l’exemple)
+# Global SHAP: on affiche la classe prédite par l’exemple
 class_for_global = pred_example
 idx_global = classes_sorted.index(class_for_global)
 
-sv_global = get_shap_matrix_for_class(shap_values, idx_global)
+sv_global = get_shap_matrix_for_class(shap_values, idx_global, X_shap)
 
 print("\nSHAP global — classe affichée:", class_names_fr.get(class_for_global, str(class_for_global)))
-
-# Summary (beeswarm)
 shap.summary_plot(sv_global, X_shap, show=True)
-
-# Bar plot (importance globale)
 shap.summary_plot(sv_global, X_shap, plot_type="bar", show=True)
 
-
-# -------- SHAP local (waterfall) sur l’exemple --------
+# Local SHAP: waterfall sur l’exemple
 sv_one_all = explainer.shap_values(X_one)
-
-# récupérer shap pour la classe prédite
 if isinstance(sv_one_all, list):
     sv_one = np.array(sv_one_all[idx_global]).reshape(-1)
 else:
     arr_one = np.array(sv_one_all)
-    if arr_one.ndim == 3 and arr_one.shape[2] == num_classes:
+    if arr_one.ndim == 3 and arr_one.shape[2] == len(classes_sorted):
         sv_one = arr_one[0, :, idx_global]
-    elif arr_one.ndim == 3 and arr_one.shape[0] == num_classes:
+    elif arr_one.ndim == 3 and arr_one.shape[0] == len(classes_sorted):
         sv_one = arr_one[idx_global, 0, :]
     else:
         sv_one = arr_one.reshape(-1)
 
-# drop bias if present
 if sv_one.shape[0] == X_one.shape[1] + 1:
     sv_one = sv_one[:-1]
 
-# base_value: parfois scalaire, parfois vecteur (multi-classe)
 base_val = explainer.expected_value
 if isinstance(base_val, (list, np.ndarray)):
     base_val_cls = float(np.array(base_val)[idx_global])
@@ -343,4 +336,5 @@ exp = shap.Explanation(
 
 shap.plots.waterfall(exp, max_display=20)
 plt.show()
+
 ```
