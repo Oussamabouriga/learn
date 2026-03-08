@@ -1,57 +1,66 @@
 ```
+
 # ============================================================
 # NOTEBOOK: GATED MODEL (XGBoost Classifier -> XGBoost Regressors)
+# + Robust load (no preprocessing artifacts required)
+# + Robust example encoding -> align to training columns
 # + SHAP (global + local on the example)
-# + Send everything to local Ollama LLM via OpenAI Python client (Ollama)
+# + Send everything to local Ollama LLM via OpenAI Python client
 #
 # PREREQUISITES (outside python):
 #   1) Start Ollama server:
 #        ollama serve
-#   2) Ensure model is pulled / runnable:
+#   2) Ensure model is pulled / runnable (once):
 #        ollama run llama3.1:latest
 #
 # Python installs (run once if needed):
-#   pip install -U openai shap pandas numpy xgboost
+#   pip install -U openai shap xgboost pandas numpy matplotlib
 # ============================================================
 
+import os
 import json
 from pathlib import Path
+
 import numpy as np
 import pandas as pd
+import matplotlib.pyplot as plt
+
 import shap
-import xgboost as xgb
 from openai import OpenAI
+
+from xgboost import XGBClassifier, XGBRegressor
+
 
 # ============================================================
 # 0) USER CONFIG (EDIT ME)
 # ============================================================
 
-# --- A) Root of your project (folder that contains "models/")
-# If your notebook is inside nps_final/, this will work:
+# --- A) Project root (auto)
+# If your notebook is inside /Users/.../Documents/nps_final, this will print correctly.
 PROJECT_ROOT = Path.cwd()
+print("PROJECT_ROOT =", PROJECT_ROOT)
 
-# If needed, hardcode it (recommended if you move notebooks):
-# PROJECT_ROOT = Path("/Users/oussama bouriga/Documents/nps_final")
+# --- B) Where your gated model is saved (relative OR absolute)
+# Your folder (from your screenshot):
+GATED_MODEL_DIR = Path("models/assembled_models/xgb_gated_optuna_v1")  # relative to PROJECT_ROOT
 
-MODEL_NAME = "xgb_gated_optuna_v1"
-GATED_MODEL_DIR = PROJECT_ROOT / "models" / "assembled_models" / MODEL_NAME
+# Resolve to absolute
+if not GATED_MODEL_DIR.is_absolute():
+    GATED_MODEL_DIR = (PROJECT_ROOT / GATED_MODEL_DIR).resolve()
 
+# Expected structure in that folder:
 XGB_CLS_FILE = GATED_MODEL_DIR / "xgb_classifier.json"
 META_FILE    = GATED_MODEL_DIR / "meta.json"
 REG_DIR      = GATED_MODEL_DIR / "regressors_by_class"
 
-# --- B) Ollama (OpenAI-compatible)
-OLLAMA_BASE_URL = "http://localhost:11434/v1"
-OLLAMA_MODEL = "llama3.1:latest"
-TEMPERATURE = 0.2
+print("\nGATED_MODEL_DIR =", GATED_MODEL_DIR)
+print("Classifier exists:", XGB_CLS_FILE.exists())
+print("Meta exists      :", META_FILE.exists())
+print("Reg dir exists   :", REG_DIR.exists())
 
-# --- C) SHAP settings
-SHAP_BACKGROUND_SIZE = 200   # use a small background for speed
-SHAP_GLOBAL_SIZE = 400       # sample size for global plot (if you have X_test)
-MAX_DISPLAY = 20
-
-# --- D) Example row you want to test (RAW features)
-# Put your real raw example here (same keys as your original raw dataset)
+# --- C) Your raw example (EDIT THIS DICT)
+# Put the same “raw” values you used before (categoricals as strings are OK).
+# Missing columns are fine.
 example_row_raw = {
     "PARCOURS_FINAL": "HORS_APPLE_EE",
     "PARCOURS_INITIAL": "HORS_APPLE_EE",
@@ -60,7 +69,7 @@ example_row_raw = {
     "Nombre_sisnitre_accepte_client": 1,
     "Nombre_sisnitre_refuse_client": np.nan,
     "Nombre_sisnitre_sans_suite_client": np.nan,
-    "code_postal": 59700,
+    "code_postal": "59700",
     "operating_system": "Android",
     "marque": "Google",
     "model": "Pixel 7 Pro ",
@@ -82,266 +91,368 @@ example_row_raw = {
     "delai_Sinistre": 602000,
 }
 
-# ============================================================
-# 1) CHECK PATHS
-# ============================================================
-print("PROJECT_ROOT   =", PROJECT_ROOT)
-print("GATED_MODEL_DIR=", GATED_MODEL_DIR)
-print("Classifier exists:", XGB_CLS_FILE.exists())
-print("Meta exists      :", META_FILE.exists())
-print("Reg dir exists   :", REG_DIR.exists())
+# --- D) Range safety for output
+CLIP_PRED_TO_0_10 = True
 
-assert GATED_MODEL_DIR.exists(), f"GATED_MODEL_DIR not found: {GATED_MODEL_DIR}"
-assert XGB_CLS_FILE.exists(), f"Missing file: {XGB_CLS_FILE}"
-assert META_FILE.exists(), f"Missing file: {META_FILE}"
-assert REG_DIR.exists(), f"Missing folder: {REG_DIR}"
+# --- E) SHAP settings
+SHAP_BACKGROUND_ROWS = 200  # only used to build a synthetic background (if you don't provide real data)
+SHAP_MAX_DISPLAY = 20       # top features to show
+
+# --- F) Ollama (OpenAI-compatible)
+OLLAMA_BASE_URL = "http://localhost:11434/v1"
+OLLAMA_MODEL = "llama3.1:latest"
+OLLAMA_TEMPERATURE = 0.2
+
+# Big context you write yourself (put your long project explanation here)
+PROJECT_CONTEXT_TEXT = """
+[COLLE ICI TON CONTEXTE LONG]
+- Ce que représente chaque variable
+- Le but du modèle
+- La logique métier
+- Comment interpréter une note prédite
+"""
+
 
 # ============================================================
-# 2) LOAD META + MODELS
+# 1) LOAD MODELS + META
 # ============================================================
+
+if not GATED_MODEL_DIR.is_dir():
+    raise FileNotFoundError(f"GATED_MODEL_DIR not found: {GATED_MODEL_DIR}")
+
+if not XGB_CLS_FILE.is_file():
+    raise FileNotFoundError(f"Missing classifier file: {XGB_CLS_FILE}")
+
+if not META_FILE.is_file():
+    raise FileNotFoundError(f"Missing meta file: {META_FILE}")
+
+if not REG_DIR.is_dir():
+    raise FileNotFoundError(f"Missing regressors directory: {REG_DIR}")
+
+# Load meta.json
 with open(META_FILE, "r", encoding="utf-8") as f:
     meta = json.load(f)
 
-# meta should contain at least the encoded feature list
-# We'll support multiple possible keys to avoid mismatch.
-feature_cols = (
-    meta.get("feature_cols")
-    or meta.get("train_columns")
-    or meta.get("X_train_columns")
-    or meta.get("encoded_feature_names")
-)
-if feature_cols is None:
-    raise ValueError("meta.json must contain feature columns list (feature_cols/train_columns/...)")
+# Load classifier
+xgb_cls_gated = XGBClassifier()
+xgb_cls_gated.load_model(str(XGB_CLS_FILE))
 
-# class ranges if saved
-class_ranges = meta.get("class_ranges", None)  # dict {class_id: [low, high, name]}
-class_names_fr = meta.get("class_names_fr", None)  # dict {class_id: "label"}
-
-# Load classifier + regressors from JSON
-xgb_cls = xgb.XGBClassifier()
-xgb_cls.load_model(str(XGB_CLS_FILE))
-
-# Load regressors by class: xgb_regressor_class_0.json etc.
+# Load regressors by class
 xgb_reg_by_class = {}
 for p in sorted(REG_DIR.glob("xgb_regressor_class_*.json")):
-    # class id from filename
-    cls_id = int(p.stem.split("_")[-1])
-    reg = xgb.XGBRegressor()
-    reg.load_model(str(p))
-    xgb_reg_by_class[cls_id] = reg
+    # filename: xgb_regressor_class_0.json -> class_id = 0
+    class_id = int(p.stem.split("_")[-1])
+    m = XGBRegressor()
+    m.load_model(str(p))
+    xgb_reg_by_class[class_id] = m
 
-print("Loaded classifier + regressors:", sorted(xgb_reg_by_class.keys()))
-print("Encoded feature count:", len(feature_cols))
+if len(xgb_reg_by_class) == 0:
+    raise FileNotFoundError(f"No regressor json found in: {REG_DIR}")
 
-# ============================================================
-# 3) PREPARE EXAMPLE (encoded alignment)
-# IMPORTANT: You must provide the encoded example.
-# If you don't have a saved preprocessing pipeline, the simplest robust approach:
-#   - You already had an encoded example before (X_new_encoded_no_te).
-#   - Otherwise, you must rebuild the SAME encoding pipeline in this notebook.
-#
-# Here: we assume you are providing a RAW dict, so we convert it to a DataFrame,
-# then we ALIGN to encoded columns using:
-#   - missing -> 0
-#   - extra -> dropped
-#
-# This ONLY works if your example_row_raw is ALREADY in encoded form.
-# If your example is raw (categoricals not one-hot/freq), you need the pipeline.
-# ============================================================
+print("\nLoaded:")
+print("- classifier:", XGB_CLS_FILE.name)
+print("- regressors:", sorted(list(xgb_reg_by_class.keys())))
 
-# If you already have an encoded example dataframe in memory, use it:
-X_example = None
-if "X_new_encoded_no_te" in globals():
-    X_example = X_new_encoded_no_te.copy()
-    print("Using existing X_new_encoded_no_te (already encoded).")
+# Class ranges + names (if saved)
+# Expect format: { "0": [0,2,"..."], "1": [3,6,"..."], ... } or dict with similar
+class_ranges = meta.get("class_ranges", None)
+class_names_fr = meta.get("class_names_fr", None)
+
+# If not found, define defaults (same mapping you used before)
+if class_ranges is None:
+    class_ranges = {
+        0: (0, 2, "extrêmement mauvais (0–2)"),
+        1: (3, 6, "mauvais (3–6)"),
+        2: (7, 8, "neutre (7–8)"),
+        3: (9, 9, "bien (9)"),
+        4: (10, 10, "très bien (10)"),
+    }
 else:
-    # fallback: treat the dict as encoded (only safe if keys match encoded columns)
-    X_example = pd.DataFrame([example_row_raw]).copy()
-    print("Using example_row_raw as-is (WARNING: this must already be encoded).")
+    # normalize keys to int
+    class_ranges = {int(k): tuple(v) for k, v in class_ranges.items()}
 
-# --- Align columns to training encoded columns
-missing_cols = [c for c in feature_cols if c not in X_example.columns]
-for c in missing_cols:
-    X_example[c] = 0.0
-
-extra_cols = [c for c in X_example.columns if c not in feature_cols]
-if extra_cols:
-    X_example = X_example.drop(columns=extra_cols)
-
-X_example = X_example[feature_cols].copy()
-
-# force numeric
-for c in X_example.columns:
-    X_example[c] = pd.to_numeric(X_example[c], errors="coerce").fillna(0.0)
-
-print("Example aligned shape:", X_example.shape)
+if class_names_fr is None:
+    class_names_fr = {k: v[2] for k, v in class_ranges.items()}
+else:
+    class_names_fr = {int(k): v for k, v in class_names_fr.items()}
 
 # ============================================================
-# 4) GATED PREDICTION (class -> regressor -> clipped to interval)
+# 2) GET FEATURE COLUMNS ROBUSTLY (NO meta.json dependency)
 # ============================================================
 
-def gated_predict_one(X_one: pd.DataFrame):
-    # class prediction
-    pred_class = int(xgb_cls.predict(X_one)[0])
+def _is_list_of_strings(x):
+    return isinstance(x, list) and len(x) > 0 and all(isinstance(i, str) for i in x)
 
-    # regression inside class
-    if pred_class not in xgb_reg_by_class:
-        raise ValueError(f"No regressor found for class {pred_class}")
+feature_cols = None
 
-    pred_value = float(xgb_reg_by_class[pred_class].predict(X_one)[0])
+# (1) Best: sklearn API if available
+if hasattr(xgb_cls_gated, "feature_names_in_") and xgb_cls_gated.feature_names_in_ is not None:
+    feature_cols = list(xgb_cls_gated.feature_names_in_)
+    print("\nfeature_cols from xgb_cls_gated.feature_names_in_ :", len(feature_cols))
 
-    # enforce interval if available
-    if class_ranges is not None and str(pred_class) in class_ranges:
-        low, high, _name = class_ranges[str(pred_class)]
-        pred_value = float(np.clip(pred_value, low, high))
-        interval = (low, high)
-    elif class_ranges is not None and pred_class in class_ranges:
-        low, high, _name = class_ranges[pred_class]
-        pred_value = float(np.clip(pred_value, low, high))
-        interval = (low, high)
-    else:
-        interval = None
+# (2) Fallback: scan meta.json for any list of strings and take the longest
+if feature_cols is None:
+    candidates = []
+    for k, v in meta.items():
+        if _is_list_of_strings(v):
+            candidates.append((k, v))
+        if isinstance(v, dict):
+            for k2, v2 in v.items():
+                if _is_list_of_strings(v2):
+                    candidates.append((f"{k}.{k2}", v2))
 
-    return pred_class, pred_value, interval
+    if len(candidates) == 0:
+        raise ValueError(
+            "Impossible de récupérer feature_cols.\n"
+            "- feature_names_in_ absent\n"
+            "- meta.json ne contient aucune liste de colonnes encodées\n"
+            "➡️ Solution: sauvegarder la liste des colonnes encodées lors du training."
+        )
 
-pred_class, pred_note, interval = gated_predict_one(X_example)
+    best_key, best_list = sorted(candidates, key=lambda t: len(t[1]), reverse=True)[0]
+    feature_cols = list(best_list)
+    print(f"\nfeature_cols from meta.json key '{best_key}' :", len(feature_cols))
 
+if len(feature_cols) < 5:
+    raise ValueError(f"feature_cols too small ({len(feature_cols)}). Something is wrong.")
+
+
+# ============================================================
+# 3) ROBUST "ENCODE" RAW EXAMPLE -> ALIGN TO feature_cols
+# IMPORTANT:
+# - We DON'T have your full training preprocessing artifacts here.
+# - So we use a safe generic approach:
+#   (a) build DataFrame from raw dict
+#   (b) pd.get_dummies(dummy_na=True) -> generates one-hot columns for any categoricals present
+#   (c) align to feature_cols (missing->0, extra dropped)
+#
+# This runs without errors. If your original training used extra steps (freq encoding),
+# those features may be missing => they will be 0.
+# ============================================================
+
+def encode_and_align_example(example_raw: dict, feature_cols: list) -> pd.DataFrame:
+    df_raw = pd.DataFrame([example_raw]).copy()
+
+    # Convert pd.NA -> np.nan if any
+    df_raw = df_raw.astype(object).where(pd.notna(df_raw), np.nan)
+
+    # Make sure strings stay strings
+    for c in df_raw.columns:
+        if df_raw[c].dtype == "object":
+            # keep as object; get_dummies will handle
+            pass
+
+    # One-hot generic
+    df_enc = pd.get_dummies(df_raw, dummy_na=True)
+
+    # Add missing columns as 0
+    missing = [c for c in feature_cols if c not in df_enc.columns]
+    for c in missing:
+        df_enc[c] = 0.0
+
+    # Drop extras
+    extra = [c for c in df_enc.columns if c not in feature_cols]
+    if len(extra) > 0:
+        df_enc = df_enc.drop(columns=extra)
+
+    # Reorder exactly
+    df_enc = df_enc[feature_cols].copy()
+
+    # Force float
+    df_enc = df_enc.astype(float)
+
+    return df_enc
+
+X_example = encode_and_align_example(example_row_raw, feature_cols)
+
+print("\nX_example aligned shape:", X_example.shape)
+print("Columns match:", list(X_example.columns) == list(feature_cols))
+
+
+# ============================================================
+# 4) GATED PREDICTION (classifier -> regressor by class)
+# ============================================================
+
+def gated_predict(X_encoded: pd.DataFrame, clf: XGBClassifier, regs_by_class: dict):
+    # predicted class
+    pred_class = clf.predict(X_encoded).astype(int)
+    c = int(pred_class[0])
+
+    if c not in regs_by_class:
+        raise KeyError(f"No regressor found for predicted class={c}. Available: {sorted(list(regs_by_class.keys()))}")
+
+    # regression
+    pred_value = float(regs_by_class[c].predict(X_encoded)[0])
+
+    # clip to class interval (strict gating)
+    low, high, _name = class_ranges.get(c, (0, 10, ""))
+    pred_value = float(np.clip(pred_value, low, high))
+
+    # optional clip to [0,10]
+    if CLIP_PRED_TO_0_10:
+        pred_value = float(np.clip(pred_value, 0, 10))
+
+    return c, pred_value
+
+pred_class_id, pred_note = gated_predict(X_example, xgb_cls_gated, xgb_reg_by_class)
+
+low, high, _ = class_ranges[pred_class_id]
 print("\n=== GATED PREDICTION ===")
-print("Classe prédite:", pred_class, "|", (class_names_fr.get(str(pred_class)) if isinstance(class_names_fr, dict) else None) or (class_names_fr.get(pred_class) if isinstance(class_names_fr, dict) else None) or "")
-print("Intervalle:", interval)
+print("Classe prédite:", pred_class_id, "|", class_names_fr.get(pred_class_id, str(pred_class_id)))
+print("Intervalle:", (low, high))
 print("Note prédite:", pred_note)
 
+
 # ============================================================
-# 5) SHAP (Classifier + regressor of predicted class)
+# 5) SHAP (GLOBAL + LOCAL) — classifier + the selected regressor
+# NOTE:
+# We don't have your real X_test here, so we build a synthetic background
+# of zeros (works and avoids shape errors).
+# If you DO have real encoded test data, replace X_bg with it.
 # ============================================================
 
-# Background for SHAP: use a small random background from the example itself if no X_test exists.
-# Best practice: pass a real background sample from your training/test encoded data.
-if "X_test_encoded_no_te" in globals():
-    X_bg = X_test_encoded_no_te.sample(min(SHAP_BACKGROUND_SIZE, len(X_test_encoded_no_te)), random_state=42).copy()
-    # align to feature_cols
-    X_bg = X_bg.reindex(columns=feature_cols, fill_value=0.0)
-    X_bg = X_bg.apply(pd.to_numeric, errors="coerce").fillna(0.0)
-else:
-    # fallback background = repeated example (works but less meaningful)
-    X_bg = pd.concat([X_example]*min(50, SHAP_BACKGROUND_SIZE), ignore_index=True)
+def shap_fix_array(sv: np.ndarray, X: pd.DataFrame) -> np.ndarray:
+    # Some SHAP versions add an extra last column (constant offset)
+    if sv.ndim == 2 and sv.shape[1] == X.shape[1] + 1:
+        return sv[:, :-1]
+    return sv
 
-# ---- Classifier SHAP
-expl_cls = shap.TreeExplainer(xgb_cls, data=X_bg, feature_perturbation="tree_path_dependent")
-sv_cls = expl_cls.shap_values(X_example)
+# --- Build synthetic background (safe)
+X_bg = pd.DataFrame(np.zeros((min(SHAP_BACKGROUND_ROWS, 200), len(feature_cols))), columns=feature_cols).astype(float)
 
-# Multi-class: shap_values can be list (per class) or ndarray (n, p, k)
-# We'll unify to "per-class array".
+# 5A) SHAP for classifier (multiclass)
+print("\n--- SHAP (Classifier) ---")
+explainer_cls = shap.TreeExplainer(xgb_cls_gated)
+
+sv_cls = explainer_cls.shap_values(X_bg)  # can be list (per class) or array
+# Choose a class to display globally (use predicted class)
+cls_to_show = pred_class_id
+
+# Global (bar)
+plt.figure()
 if isinstance(sv_cls, list):
-    sv_cls_by_class = sv_cls
-elif isinstance(sv_cls, np.ndarray) and sv_cls.ndim == 3:
-    # (n, p, k) -> list k of (n,p)
-    sv_cls_by_class = [sv_cls[:, :, k] for k in range(sv_cls.shape[2])]
+    sv = shap_fix_array(np.array(sv_cls[cls_to_show]), X_bg)
 else:
-    # binary: (n,p)
-    sv_cls_by_class = [sv_cls]
+    # sometimes shape: (n_samples, n_features, n_classes)
+    if sv_cls.ndim == 3:
+        sv = shap_fix_array(sv_cls[:, :, cls_to_show], X_bg)
+    else:
+        sv = shap_fix_array(sv_cls, X_bg)
 
-# Global plot for predicted class (bar)
-cls_for_shap = pred_class if pred_class < len(sv_cls_by_class) else 0
-sv_cls_mat = sv_cls_by_class[cls_for_shap]
+shap.summary_plot(sv, X_bg, plot_type="bar", show=True, max_display=SHAP_MAX_DISPLAY)
 
-# some SHAP versions return an extra bias column -> drop if needed
-if sv_cls_mat.shape[1] == X_example.shape[1] + 1:
-    sv_cls_mat = sv_cls_mat[:, :-1]
+# Local (example) — waterfall on that same class
+sv_one_cls = explainer_cls.shap_values(X_example)
+if isinstance(sv_one_cls, list):
+    sv_one = shap_fix_array(np.array(sv_one_cls[cls_to_show]), X_example)
+    base_val = explainer_cls.expected_value[cls_to_show] if isinstance(explainer_cls.expected_value, (list, np.ndarray)) else explainer_cls.expected_value
+else:
+    if sv_one_cls.ndim == 3:
+        sv_one = shap_fix_array(sv_one_cls[:, :, cls_to_show], X_example)
+    else:
+        sv_one = shap_fix_array(sv_one_cls, X_example)
+    base_val = explainer_cls.expected_value[cls_to_show] if isinstance(explainer_cls.expected_value, (list, np.ndarray)) else explainer_cls.expected_value
 
-print(f"\nSHAP global (classifier) — classe: {cls_for_shap}")
-shap.summary_plot(sv_cls_mat, X_example, plot_type="bar", show=True, max_display=MAX_DISPLAY)
-
-print("\nSHAP local (classifier) — example")
+plt.figure()
 shap.plots.waterfall(
     shap.Explanation(
-        values=sv_cls_mat[0],
-        base_values=(expl_cls.expected_value[cls_for_shap] if isinstance(expl_cls.expected_value, (list, np.ndarray)) else expl_cls.expected_value),
+        values=sv_one[0],
+        base_values=base_val,
         data=X_example.iloc[0],
-        feature_names=X_example.columns
+        feature_names=X_example.columns,
     ),
-    max_display=MAX_DISPLAY
+    max_display=SHAP_MAX_DISPLAY,
+    show=True
 )
 
-# ---- Regressor SHAP (for predicted class regressor)
-reg_model = xgb_reg_by_class[pred_class]
-expl_reg = shap.TreeExplainer(reg_model, data=X_bg, feature_perturbation="tree_path_dependent")
-sv_reg = expl_reg.shap_values(X_example)
+# 5B) SHAP for the selected regressor
+print("\n--- SHAP (Regressor selected by class) ---")
+reg_model = xgb_reg_by_class[pred_class_id]
+explainer_reg = shap.TreeExplainer(reg_model)
 
-if isinstance(sv_reg, np.ndarray) and sv_reg.ndim == 2 and sv_reg.shape[1] == X_example.shape[1] + 1:
-    sv_reg = sv_reg[:, :-1]
+sv_reg_bg = explainer_reg.shap_values(X_bg)
+sv_reg_bg = shap_fix_array(np.array(sv_reg_bg), X_bg)
 
-print(f"\nSHAP global (regressor class {pred_class})")
-shap.summary_plot(sv_reg, X_example, plot_type="bar", show=True, max_display=MAX_DISPLAY)
+plt.figure()
+shap.summary_plot(sv_reg_bg, X_bg, plot_type="bar", show=True, max_display=SHAP_MAX_DISPLAY)
 
-print(f"\nSHAP local (regressor class {pred_class}) — example")
+sv_reg_one = explainer_reg.shap_values(X_example)
+sv_reg_one = shap_fix_array(np.array(sv_reg_one), X_example)
+
+# Build a short "top reasons" list for the LLM
+abs_contrib = np.abs(sv_reg_one[0])
+top_idx = np.argsort(abs_contrib)[::-1][:10]
+top_features = []
+for i in top_idx:
+    feat = X_example.columns[i]
+    val = float(X_example.iloc[0, i])
+    contrib = float(sv_reg_one[0, i])
+    top_features.append({"feature": str(feat), "value": val, "shap_contribution": contrib})
+
+plt.figure()
 shap.plots.waterfall(
     shap.Explanation(
-        values=sv_reg[0],
-        base_values=expl_reg.expected_value,
+        values=sv_reg_one[0],
+        base_values=explainer_reg.expected_value,
         data=X_example.iloc[0],
-        feature_names=X_example.columns
+        feature_names=X_example.columns,
     ),
-    max_display=MAX_DISPLAY
+    max_display=SHAP_MAX_DISPLAY,
+    show=True
 )
 
-# Also get top features for LLM context
-def top_features_from_shap(values_row, cols, k=10):
-    abs_vals = np.abs(values_row)
-    idx = np.argsort(abs_vals)[::-1][:k]
-    return [(cols[i], float(values_row[i])) for i in idx]
+print("\nTop SHAP features (regressor, example):")
+for t in top_features[:10]:
+    print("-", t)
 
-top_cls = top_features_from_shap(sv_cls_mat[0], list(X_example.columns), k=10)
-top_reg = top_features_from_shap(sv_reg[0], list(X_example.columns), k=10)
 
 # ============================================================
-# 6) SEND TO OLLAMA LLM (OpenAI-compatible)
+# 6) SEND TO OLLAMA LLM (OpenAI compatible)
 # ============================================================
 
 client = OpenAI(
     base_url=OLLAMA_BASE_URL,
-    api_key="ollama"  # required by client, ignored by Ollama
+    api_key="ollama"  # Ollama ignores the key but OpenAI client requires one
 )
 
-system_msg = """Tu es un assistant expert en data science.
-Tu dois valider / critiquer la prédiction d'un système ML "gated" :
-- un classifieur XGBoost choisit une classe de satisfaction
-- puis un régresseur XGBoost spécialisé prédit une note dans l'intervalle de cette classe
-Tu dois expliquer si la prédiction te semble cohérente, et pourquoi, en te basant sur les features importantes (SHAP).
-Réponds en français, clair, structuré, avec recommandations."""
-# You can replace the user context below with your own long context text.
-user_context = "Contexte métier: (à compléter par toi) ..."
+system_msg = f"""
+Tu es un assistant expert en analyse de modèles ML.
+Tu dois valider (ou critiquer) la prédiction d'un système "gated" :
+- Un modèle de classification choisit une classe de satisfaction.
+- Ensuite un modèle de régression dédié à cette classe prédit une note dans l'intervalle correspondant.
+Tu dois répondre en français, de manière professionnelle, structurée et courte.
 
-payload = {
-    "prediction": {
-        "predicted_class": pred_class,
-        "predicted_note": pred_note,
-        "interval": interval,
-        "class_label": (class_names_fr.get(str(pred_class)) if isinstance(class_names_fr, dict) else None) or (class_names_fr.get(pred_class) if isinstance(class_names_fr, dict) else None)
+Contexte projet:
+{PROJECT_CONTEXT_TEXT}
+""".strip()
+
+user_msg = {
+    "task": "Validate gated model decision",
+    "gated_prediction": {
+        "predicted_class_id": pred_class_id,
+        "predicted_class_name": class_names_fr.get(pred_class_id, str(pred_class_id)),
+        "interval": [float(low), float(high)],
+        "predicted_note": float(pred_note),
     },
-    "example_row_used": example_row_raw,  # what you provided
-    "top_shap_classifier": top_cls,
-    "top_shap_regressor": top_reg
+    "input_example_raw": example_row_raw,
+    "top_shap_features_for_example (regressor)": top_features,
+    "notes": [
+        "Les features SHAP listées sont les facteurs les plus influents pour la prédiction de note (régression).",
+        "Tu peux dire si la prédiction paraît cohérente ou si certaines valeurs sont suspectes / incohérentes.",
+        "Propose aussi des vérifications à faire sur les données si nécessaire."
+    ]
 }
-
-user_msg = f"""{user_context}
-
-Voici le résultat du modèle gated + explications SHAP.
-Analyse et dis si tu es d'accord ou non, et quelles infos supplémentaires seraient utiles.
-
-DATA (json):
-{json.dumps(payload, ensure_ascii=False, indent=2)}
-"""
 
 resp = client.chat.completions.create(
     model=OLLAMA_MODEL,
     messages=[
         {"role": "system", "content": system_msg},
-        {"role": "user", "content": user_msg},
+        {"role": "user", "content": json.dumps(user_msg, ensure_ascii=False, indent=2)},
     ],
-    temperature=TEMPERATURE
+    temperature=OLLAMA_TEMPERATURE
 )
 
-print("\n================ LLM RESPONSE ================\n")
-print(resp.choices[0].message.content)
+llm_text = resp.choices[0].message.content
+print("\n================= LLM RESPONSE =================\n")
+print(llm_text)
 ```
