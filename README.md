@@ -2,27 +2,71 @@
 
 # ============================================================
 # 7) EXAMPLE PREDICTION (robuste: alignement colonnes)
+# + Exemple dict à tester (RAW)
 # ============================================================
 
-# Priority:
-# - if X_new_encoded_no_te exists: use it (already encoded)
-# - else if test_row_xgb_no_te exists: build df and align (but MUST be encoded the same way!)
-X_example = None
+import numpy as np
+import pandas as pd
 
-if "X_new_encoded_no_te" in globals():
-    X_example = X_new_encoded_no_te.copy()
+# -----------------------------
+# A) Exemple RAW (tu peux modifier les valeurs)
+# -----------------------------
+example_row_raw = {
+    "PARCOURS_FINAL": "HORS_APPLE_EE",
+    "PARCOURS_INITIAL": "HORS_APPLE_EE",
+    "tarif": 19.99,
+    "Nombre_sisnitre_client": 1,
+    "Nombre_sisnitre_accepte_client": 1,
+    "Nombre_sisnitre_refuse_client": np.nan,
+    "Nombre_sisnitre_sans_suite_client": np.nan,
+    "code_postal": 59700,
+    "operating_system": "Android",
+    "marque": "Google",
+    "model": "Pixel 7 Pro ",
+    "ancienneté_de_contrat": 509555,
+    "garantie": "Dommage",
+    "Age": 43,
+    "dossier_complet": 1,
+    "decision_ai": 0,
+    "nombre_prestation_ko": 0,
+    "Nbr_ticket_pieces": 0,
+    "Nbr_ticket_information": 4,
+    "list_prest": "ADVANCED_SWAP",
+    "delai_declaration": 279000,
+    "delai_de_completude": np.nan,
+    "delai_decision": 13090,
+    "delai_reparation": 4,
+    "delai_indemnisation": 4,
+    "montant_indem": np.nan,
+    "delai_Sinistre": 602000,
+}
 
-elif "test_row_xgb_no_te" in globals():
-    # ATTENTION: ceci marche uniquement si test_row_xgb_no_te est déjà ENCODÉ
-    # (mêmes colonnes que X_train_all, sinon il faut passer par TON pipeline d'encodage)
-    X_example = pd.DataFrame(test_row_xgb_no_te).copy()
-
-else:
-    raise ValueError("Provide X_new_encoded_no_te (encoded example) or test_row_xgb_no_te (already-encoded dict).")
+# Version liste (si tu veux plusieurs lignes)
+test_row_xgb_no_te = [example_row_raw]
 
 
 # -----------------------------
-# FIX: aligner les colonnes avec le train
+# B) Construire X_example
+# Priority:
+#  - if X_new_encoded_no_te exists: use it (already encoded)
+#  - else: use the dict above BUT it MUST already be ENCODED like X_train_all
+# -----------------------------
+X_example = None
+
+if "X_new_encoded_no_te" in globals():
+    # ✅ Recommandé: exemple déjà encodé avec ton pipeline
+    X_example = X_new_encoded_no_te.copy()
+
+else:
+    # ⚠️ Ici: ton dict "example_row_raw" est RAW.
+    # Pour que ça marche, il doit être transformé par le MÊME pipeline d'encodage que le train.
+    # Donc: soit tu as déjà une variable encodée (X_new_encoded_no_te),
+    # soit tu dois appeler ton code d'encodage pour produire X_example_encoded.
+    X_example = pd.DataFrame(test_row_xgb_no_te).copy()
+
+
+# -----------------------------
+# C) FIX: aligner les colonnes avec le train (évite KeyError)
 # -----------------------------
 # 1) Ajouter les colonnes manquantes
 missing_cols = [c for c in X_train_all.columns if c not in X_example.columns]
@@ -40,11 +84,12 @@ X_example = X_example[X_train_all.columns].copy()
 # 4) Forcer float
 X_example = X_example.astype(float)
 
-print("✅ Example aligned shape:", X_example.shape)
-print("✅ Example columns match train:", list(X_example.columns) == list(X_train_all.columns))
+print("Example aligned shape:", X_example.shape)
+print("Example columns match train:", list(X_example.columns) == list(X_train_all.columns))
+
 
 # -----------------------------
-# Gated prediction
+# D) Gated prediction
 # -----------------------------
 ex_class_arr, ex_value_arr = gated_predict(X_example, xgb_cls_gated, xgb_reg_by_class)
 
