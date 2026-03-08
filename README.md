@@ -1,202 +1,123 @@
 ```
 # ============================================================
-# CATBOOST CLASSIFICATION — BAYESIAN OPTIMIZATION (Optuna)
-# (same full process)
-# - Optuna multi-metric (minimize logloss AND maximize f1_macro + accuracy)
-# - Uses StratifiedKFold CV on TRAIN only
-# - Train final best model (early stopping)
-# - Metrics train/test + confusion matrix + ROC OvR
-# - SHAP global + SHAP example (1 row)
-# - Save to models/catboost/classification/<model_name>/
+# CATBOOST CLASSIFICATION — BASELINE (NO TE)
+# + Train/Test metrics
+# + Confusion matrix + ROC OvR (avec noms de classes)
+# + Exemple (1 ligne) -> prédiction + proba
+# + SHAP global (summary + bar) + SHAP local (waterfall sur l’exemple)
 #
-# Uses your existing prepared data:
-#   X_train_cat_cls_no_te, X_test_cat_cls_no_te
-#   y_train_cat_cls_no_te, y_test_cat_cls_no_te
-#   cat_cols_cb
-#   class_names_fr (dict: id -> label)
-#
-# Requirements:
-#   pip install catboost optuna shap scikit-learn
+# DATA à utiliser (déjà préparées chez toi) :
+#   - X_train_cat_cls_no_te, X_test_cat_cls_no_te
+#   - y_train_cat_cls_no_te, y_test_cat_cls_no_te
+#   - cat_cols_cb  (liste des colonnes catégorielles CatBoost)
+#   - class_names_fr (dict: id -> nom FR)
 # ============================================================
 
-import os
-import json
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
 from catboost import CatBoostClassifier, Pool
-from sklearn.model_selection import StratifiedKFold
+
 from sklearn.metrics import (
     accuracy_score, f1_score, precision_score, recall_score,
-    confusion_matrix, classification_report,
-    roc_curve, auc
+    confusion_matrix, classification_report, roc_curve, auc
 )
 from sklearn.preprocessing import label_binarize
 
-import optuna
 import shap
 
 
 # ==============================
-# 0) Inputs + checks
+# 1) DATA (déjà prêtes)
 # ==============================
-assert "X_train_cat_cls_no_te" in globals() and "X_test_cat_cls_no_te" in globals()
-assert "y_train_cat_cls_no_te" in globals() and "y_test_cat_cls_no_te" in globals()
-assert "cat_cols_cb" in globals()
-assert "class_names_fr" in globals()
+X_train_cat_cls = X_train_cat_cls_no_te.copy()
+X_test_cat_cls  = X_test_cat_cls_no_te.copy()
 
-X_train_bayes = X_train_cat_cls_no_te.copy()
-X_test_bayes  = X_test_cat_cls_no_te.copy()
+y_train_cat_cls = pd.to_numeric(pd.Series(y_train_cat_cls_no_te), errors="coerce").astype(int).values
+y_test_cat_cls  = pd.to_numeric(pd.Series(y_test_cat_cls_no_te),  errors="coerce").astype(int).values
 
-y_train_bayes = pd.to_numeric(pd.Series(y_train_cat_cls_no_te), errors="coerce").astype(int).values
-y_test_bayes  = pd.to_numeric(pd.Series(y_test_cat_cls_no_te),  errors="coerce").astype(int).values
-
-classes_sorted = sorted(np.unique(y_train_bayes))
+classes_sorted = sorted(np.unique(y_train_cat_cls))
 num_classes = len(classes_sorted)
+
+# Liste des noms FR dans l’ordre des ids
 class_labels_fr = [class_names_fr[c] for c in classes_sorted]
 
-print("Train:", X_train_bayes.shape, y_train_bayes.shape)
-print("Test :", X_test_bayes.shape,  y_test_bayes.shape)
+print("Train:", X_train_cat_cls.shape, y_train_cat_cls.shape)
+print("Test :", X_test_cat_cls.shape,  y_test_cat_cls.shape)
 print("Classes:", classes_sorted)
+print("Noms classes:", class_labels_fr)
+print("Cat cols:", cat_cols_cb)
 
 
 # ==============================
-# 1) CV config + Optuna config
+# 2) POOLS (CatBoost)
 # ==============================
-n_splits = 5
-random_state = 42
-n_trials = 40  # change 20..150 depending on compute
-timeout_sec = None  # or set like 3600
-
-cv = StratifiedKFold(n_splits=n_splits, shuffle=True, random_state=random_state)
-
-
-# ==============================
-# 2) Objective (multi-metric)
-#    - We track 3 objectives:
-#       1) minimize logloss (good probability quality)
-#       2) maximize f1_macro (balanced across classes)
-#       3) maximize accuracy (simple business metric)
-# ==============================
-def objective(trial):
-    params = {
-        "loss_function": "MultiClass",
-        "eval_metric": "MultiClass",  # multi-class logloss-like metric
-        "random_seed": random_state,
-        "allow_writing_files": False,
-        "verbose": False,
-
-        # Main tuned params
-        "iterations": trial.suggest_int("iterations", 600, 2600),
-        "learning_rate": trial.suggest_float("learning_rate", 0.01, 0.15, log=True),
-        "depth": trial.suggest_int("depth", 4, 10),
-        "l2_leaf_reg": trial.suggest_float("l2_leaf_reg", 1.0, 20.0, log=True),
-
-        # Randomness / regularization
-        "random_strength": trial.suggest_float("random_strength", 0.0, 2.0),
-        "bagging_temperature": trial.suggest_float("bagging_temperature", 0.0, 2.0),
-
-        # Sampling
-        "subsample": trial.suggest_float("subsample", 0.6, 1.0),
-        "colsample_bylevel": trial.suggest_float("colsample_bylevel", 0.6, 1.0),
-
-        "grow_policy": trial.suggest_categorical("grow_policy", ["SymmetricTree", "Lossguide"]),
-        "bootstrap_type": trial.suggest_categorical("bootstrap_type", ["Bayesian", "Bernoulli", "MVS"]),
-    }
-
-    fold_logloss = []
-    fold_f1 = []
-    fold_acc = []
-
-    for tr_idx, va_idx in cv.split(X_train_bayes, y_train_bayes):
-        X_tr = X_train_bayes.iloc[tr_idx].copy()
-        y_tr = y_train_bayes[tr_idx].copy()
-        X_va = X_train_bayes.iloc[va_idx].copy()
-        y_va = y_train_bayes[va_idx].copy()
-
-        train_pool = Pool(X_tr, y_tr, cat_features=cat_cols_cb)
-        val_pool   = Pool(X_va, y_va, cat_features=cat_cols_cb)
-
-        model = CatBoostClassifier(**params)
-        model.fit(train_pool, eval_set=val_pool, use_best_model=True, early_stopping_rounds=150)
-
-        # Predict on validation
-        pred_va = model.predict(X_va).astype(int).reshape(-1)
-        proba_va = model.predict_proba(X_va)
-
-        # Metrics
-        acc = float(accuracy_score(y_va, pred_va))
-        f1m = float(f1_score(y_va, pred_va, average="macro"))
-
-        # CatBoost can provide its eval metric value at best iteration:
-        # easiest robust way: compute multiclass logloss manually
-        eps = 1e-12
-        proba_va = np.clip(proba_va, eps, 1 - eps)
-        # logloss = mean(-log(p_true))
-        p_true = proba_va[np.arange(len(y_va)), y_va]
-        logloss = float(np.mean(-np.log(p_true)))
-
-        fold_acc.append(acc)
-        fold_f1.append(f1m)
-        fold_logloss.append(logloss)
-
-    return float(np.mean(fold_logloss)), float(np.mean(fold_f1)), float(np.mean(fold_acc))
-
-
-study = optuna.create_study(
-    directions=["minimize", "maximize", "maximize"]  # logloss, f1_macro, accuracy
+train_pool_cat_cls = Pool(
+    X_train_cat_cls,
+    y_train_cat_cls,
+    cat_features=cat_cols_cb
 )
 
-study.optimize(objective, n_trials=n_trials, timeout=timeout_sec)
-
-best_trial = study.best_trials[0]  # “best” is Pareto-optimal; Optuna picks one representative
-
-print("\n=== Optuna done ===")
-print("Best trial number:", best_trial.number)
-print("Best values [logloss, f1_macro, accuracy]:", best_trial.values)
-print("Best params:", best_trial.params)
-
-
-# ==============================
-# 3) Train final model on full train (best params)
-# ==============================
-model_name = "catboost_cls_bayes_optuna_no_te_v1"
-
-best_params = dict(best_trial.params)
-
-cat_cls_bayes_best = CatBoostClassifier(
-    loss_function="MultiClass",
-    eval_metric="MultiClass",
-    random_seed=random_state,
-    allow_writing_files=False,
-    verbose=200,
-    **best_params
+test_pool_cat_cls = Pool(
+    X_test_cat_cls,
+    y_test_cat_cls,
+    cat_features=cat_cols_cb
 )
 
-train_pool_full = Pool(X_train_bayes, y_train_bayes, cat_features=cat_cols_cb)
-test_pool_full  = Pool(X_test_bayes,  y_test_bayes,  cat_features=cat_cols_cb)
 
-cat_cls_bayes_best.fit(
-    train_pool_full,
-    eval_set=test_pool_full,
+# ==============================
+# 3) HYPERPARAMS (baseline)
+# Fix: bootstrap_type compatible avec subsample
+# ==============================
+cat_params_cls_base = {
+    "loss_function": "MultiClass",
+    "eval_metric": "MultiClass",
+    "random_seed": 42,
+    "allow_writing_files": False,
+    "verbose": 200,
+
+    "iterations": 1500,
+    "learning_rate": 0.05,
+    "depth": 6,
+    "l2_leaf_reg": 3.0,
+
+    # IMPORTANT: Bernoulli permet subsample (Bayesian ne le permet pas)
+    "bootstrap_type": "Bernoulli",
+    "subsample": 0.8,
+    "colsample_bylevel": 0.8,
+
+    "random_strength": 0.5
+}
+
+model_name = "catboost_cls_baseline_no_te_v1"
+
+
+# ==============================
+# 4) TRAIN
+# ==============================
+cat_cls = CatBoostClassifier(**cat_params_cls_base)
+
+cat_cls.fit(
+    train_pool_cat_cls,
+    eval_set=test_pool_cat_cls,
     use_best_model=True,
     early_stopping_rounds=150
 )
 
-print("Final model trained:", model_name)
+print("Model trained:", model_name)
 
 
 # ==============================
-# 4) Predict + metrics (train/test)
+# 5) PRED + METRICS (train/test)
 # ==============================
-pred_train = cat_cls_bayes_best.predict(X_train_bayes).astype(int).reshape(-1)
-pred_test  = cat_cls_bayes_best.predict(X_test_bayes).astype(int).reshape(-1)
+pred_train = cat_cls.predict(X_train_cat_cls).astype(int).reshape(-1)
+pred_test  = cat_cls.predict(X_test_cat_cls).astype(int).reshape(-1)
 
-proba_train = cat_cls_bayes_best.predict_proba(X_train_bayes)
-proba_test  = cat_cls_bayes_best.predict_proba(X_test_bayes)
+proba_train = cat_cls.predict_proba(X_train_cat_cls)
+proba_test  = cat_cls.predict_proba(X_test_cat_cls)
 
-def metrics_classification(y_true, y_pred):
+def metrics_cls(y_true, y_pred):
     return {
         "accuracy": float(accuracy_score(y_true, y_pred)),
         "f1_macro": float(f1_score(y_true, y_pred, average="macro")),
@@ -205,20 +126,20 @@ def metrics_classification(y_true, y_pred):
         "recall_macro": float(recall_score(y_true, y_pred, average="macro", zero_division=0)),
     }
 
-m_train = metrics_classification(y_train_bayes, pred_train)
-m_test  = metrics_classification(y_test_bayes,  pred_test)
+m_train = metrics_cls(y_train_cat_cls, pred_train)
+m_test  = metrics_cls(y_test_cat_cls,  pred_test)
 
 metrics_df = pd.DataFrame([
     {"Jeu": "Train", **m_train},
     {"Jeu": "Test",  **m_test},
 ])
 
-print("\n=== Métriques (CatBoost classification — Bayesian Optuna) ===")
+print("\n=== Métriques (CatBoost classification) ===")
 display(metrics_df)
 
 print("\n=== Rapport détaillé (test) ===")
 print(classification_report(
-    y_test_bayes,
+    y_test_cat_cls,
     pred_test,
     labels=classes_sorted,
     target_names=class_labels_fr,
@@ -227,19 +148,22 @@ print(classification_report(
 
 
 # ==============================
-# 5) Confusion matrix (test) with French labels
+# 6) MATRICE DE CONFUSION (test) avec noms
 # ==============================
-cm = confusion_matrix(y_test_bayes, pred_test, labels=classes_sorted)
-cm_df = pd.DataFrame(cm, index=[f"Réel: {n}" for n in class_labels_fr], columns=[f"Prédit: {n}" for n in class_labels_fr])
-
+cm = confusion_matrix(y_test_cat_cls, pred_test, labels=classes_sorted)
+cm_df = pd.DataFrame(
+    cm,
+    index=[f"Réel: {n}" for n in class_labels_fr],
+    columns=[f"Prédit: {n}" for n in class_labels_fr],
+)
 print("\n=== Matrice de confusion (test) ===")
 display(cm_df)
 
 
 # ==============================
-# 6) ROC curves OvR (multi-class)
+# 7) ROC OvR (test) avec noms des classes
 # ==============================
-y_test_bin = label_binarize(y_test_bayes, classes=classes_sorted)
+y_test_bin = label_binarize(y_test_cat_cls, classes=classes_sorted)
 
 plt.figure(figsize=(7, 6))
 for i, c in enumerate(classes_sorted):
@@ -257,83 +181,166 @@ plt.tight_layout()
 plt.show()
 
 
-# ==============================
-# 7) SHAP (global + example)
-# ==============================
-# For classification, SHAP returns per-class values.
-# We'll show SHAP for the predicted class of the first test row.
+# ============================================================
+# 8) EXEMPLE (1 ligne) -> prédiction + proba
+#    -> on aligne exactement sur les colonnes de X_train_cat_cls
+# ============================================================
 
-sample_size = min(300, len(X_test_bayes))
-X_shap = X_test_bayes.sample(sample_size, random_state=42).copy()
+# IMPORTANT:
+# - Mets ici ton exemple complet si tu veux.
+# - Si tu n’as pas une colonne, on la crée en NaN (comme d’habitude).
+test_row_cat_cls_no_te = [{
+    # exemples (à adapter)
+    "PARCOURS_FINAL": "HORS_APPLE_EE",
+    "PARCOURS_INITIAL": "HORS_APPLE_EE",
+    "code_postal": "59700",
+    "operating_system": "Android",
+    "marque": "Google",
+    "model": "Pixel 7 Pro ",
+    "garantie": "Dommage",
+    "list_prest": "ADVANCED_SWAP",
+    # ... ajoute le reste si tu veux
+}]
 
-explainer = shap.TreeExplainer(cat_cls_bayes_best)
-shap_values_all = explainer.shap_values(X_shap)
+X_one = pd.DataFrame(test_row_cat_cls_no_te).copy()
 
-# Example row
-X_one = X_test_bayes.iloc[[0]].copy()
-pred_one = int(cat_cls_bayes_best.predict(X_one)[0])
-proba_one = cat_cls_bayes_best.predict_proba(X_one)[0]
+# Ajouter les colonnes manquantes + aligner l’ordre
+for c in X_train_cat_cls.columns:
+    if c not in X_one.columns:
+        X_one[c] = np.nan
+X_one = X_one[X_train_cat_cls.columns].copy()
 
-print("\n=== Exemple (1 ligne) ===")
-print("Classe prédite:", pred_one, "->", class_names_fr[pred_one])
-print("Probabilités par classe:")
-for c in classes_sorted:
-    print(f" - {class_names_fr[c]}: {proba_one[c]:.4f}")
+# Nettoyage CatBoost (critique) :
+# 1) pd.NA -> np.nan
+X_one = X_one.astype(object).where(pd.notna(X_one), np.nan)
 
-# Global SHAP for that class
-print("\nSHAP global (classe):", pred_one, "->", class_names_fr[pred_one])
+# 2) colonnes catégorielles -> string + normaliser les "manquants"
+for c in cat_cols_cb:
+    if c in X_one.columns:
+        X_one[c] = X_one[c].astype(str)
+        X_one.loc[X_one[c].isin(["nan", "None", "<NA>"]), c] = "__MISSING__"
 
-if isinstance(shap_values_all, list):
-    shap_vals_for_class = shap_values_all[pred_one]
+# 3) colonnes non-catégorielles -> numeric
+num_cols = [c for c in X_train_cat_cls.columns if c not in cat_cols_cb]
+for c in num_cols:
+    if c in X_one.columns:
+        X_one[c] = pd.to_numeric(X_one[c], errors="coerce")
+
+# Prédiction exemple
+pred_example = int(cat_cls.predict(X_one).reshape(-1)[0])
+proba_example = cat_cls.predict_proba(X_one).reshape(-1)
+
+print("\n=== EXEMPLE (classification) ===")
+print("Classe prédite (id):", pred_example)
+print("Classe prédite (nom):", class_names_fr.get(pred_example, str(pred_example)))
+
+# Afficher proba par classe avec noms
+proba_df = pd.DataFrame({
+    "class_id": classes_sorted,
+    "class_name_fr": [class_names_fr[c] for c in classes_sorted],
+    "proba": [float(proba_example[i]) for i in range(num_classes)]
+}).sort_values("proba", ascending=False).reset_index(drop=True)
+
+display(proba_df)
+
+
+# ============================================================
+# 9) SHAP (CatBoostClassifier)
+# - Global: summary + bar (sur une classe choisie)
+# - Local: waterfall sur l’exemple (classe prédite)
+# ============================================================
+
+# Petit échantillon pour accélérer SHAP (modifiable)
+sample_size = min(300, len(X_test_cat_cls))
+X_shap = X_test_cat_cls.sample(sample_size, random_state=42).copy()
+
+# Même nettoyage CatBoost sur X_shap (au cas où)
+X_shap = X_shap.astype(object).where(pd.notna(X_shap), np.nan)
+for c in cat_cols_cb:
+    if c in X_shap.columns:
+        X_shap[c] = X_shap[c].astype(str)
+        X_shap.loc[X_shap[c].isin(["nan", "None", "<NA>"]), c] = "__MISSING__"
+for c in num_cols:
+    if c in X_shap.columns:
+        X_shap[c] = pd.to_numeric(X_shap[c], errors="coerce")
+
+# Explainer
+explainer = shap.TreeExplainer(cat_cls)
+shap_values = explainer.shap_values(X_shap)
+
+# shap_values peut être:
+# - list (une matrice par classe)
+# - ou array 3D selon versions
+def get_shap_matrix_for_class(shap_values_obj, class_index):
+    if isinstance(shap_values_obj, list):
+        sv = shap_values_obj[class_index]
+    else:
+        # si array 3D: (n_samples, n_features, n_classes) ou (n_classes, n_samples, n_features)
+        arr = np.array(shap_values_obj)
+        if arr.ndim == 3 and arr.shape[2] == num_classes:
+            sv = arr[:, :, class_index]
+        elif arr.ndim == 3 and arr.shape[0] == num_classes:
+            sv = arr[class_index, :, :]
+        else:
+            sv = arr
+    sv = np.array(sv)
+
+    # Fix classique: parfois CatBoost/SHAP ajoute une colonne “bias”
+    if sv.shape[1] == X_shap.shape[1] + 1:
+        sv = sv[:, :-1]
+    return sv
+
+# Choisir la classe à afficher globalement
+# (par défaut: la classe prédite par l’exemple)
+class_for_global = pred_example
+idx_global = classes_sorted.index(class_for_global)
+
+sv_global = get_shap_matrix_for_class(shap_values, idx_global)
+
+print("\nSHAP global — classe affichée:", class_names_fr.get(class_for_global, str(class_for_global)))
+
+# Summary (beeswarm)
+shap.summary_plot(sv_global, X_shap, show=True)
+
+# Bar plot (importance globale)
+shap.summary_plot(sv_global, X_shap, plot_type="bar", show=True)
+
+
+# -------- SHAP local (waterfall) sur l’exemple --------
+sv_one_all = explainer.shap_values(X_one)
+
+# récupérer shap pour la classe prédite
+if isinstance(sv_one_all, list):
+    sv_one = np.array(sv_one_all[idx_global]).reshape(-1)
 else:
-    shap_vals_for_class = shap_values_all[:, :, pred_one]
+    arr_one = np.array(sv_one_all)
+    if arr_one.ndim == 3 and arr_one.shape[2] == num_classes:
+        sv_one = arr_one[0, :, idx_global]
+    elif arr_one.ndim == 3 and arr_one.shape[0] == num_classes:
+        sv_one = arr_one[idx_global, 0, :]
+    else:
+        sv_one = arr_one.reshape(-1)
 
-shap.summary_plot(shap_vals_for_class, X_shap, show=True)
-shap.summary_plot(shap_vals_for_class, X_shap, plot_type="bar", show=True)
+# drop bias if present
+if sv_one.shape[0] == X_one.shape[1] + 1:
+    sv_one = sv_one[:-1]
 
-# Local SHAP on the same example row
-shap_one_all = explainer.shap_values(X_one)
-if isinstance(shap_one_all, list):
-    shap_one = shap_one_all[pred_one]
-    base_val = explainer.expected_value[pred_one] if isinstance(explainer.expected_value, (list, np.ndarray)) else explainer.expected_value
+# base_value: parfois scalaire, parfois vecteur (multi-classe)
+base_val = explainer.expected_value
+if isinstance(base_val, (list, np.ndarray)):
+    base_val_cls = float(np.array(base_val)[idx_global])
 else:
-    shap_one = shap_one_all[:, :, pred_one]
-    base_val = explainer.expected_value[pred_one] if isinstance(explainer.expected_value, (list, np.ndarray)) else explainer.expected_value
+    base_val_cls = float(base_val)
 
-shap.plots.waterfall(
-    shap.Explanation(
-        values=shap_one[0],
-        base_values=base_val,
-        data=X_one.iloc[0],
-        feature_names=X_one.columns
-    ),
-    max_display=20
+print("\nSHAP local — explication de l’exemple pour la classe:", class_names_fr.get(class_for_global, str(class_for_global)))
+
+exp = shap.Explanation(
+    values=sv_one,
+    base_values=base_val_cls,
+    data=X_one.iloc[0],
+    feature_names=X_one.columns
 )
+
+shap.plots.waterfall(exp, max_display=20)
 plt.show()
-
-
-# ==============================
-# 8) Save model + artifacts
-# ==============================
-save_dir = os.path.join("models", "catboost", "classification", model_name)
-os.makedirs(save_dir, exist_ok=True)
-
-cat_cls_bayes_best.save_model(os.path.join(save_dir, "model.cbm"))
-metrics_df.to_csv(os.path.join(save_dir, "metrics_train_test.csv"), index=False)
-cm_df.to_csv(os.path.join(save_dir, "confusion_matrix_test.csv"))
-
-with open(os.path.join(save_dir, "best_params.json"), "w") as f:
-    json.dump(best_params, f, indent=2)
-
-with open(os.path.join(save_dir, "best_trial_values.json"), "w") as f:
-    json.dump(
-        {"logloss_cv": float(best_trial.values[0]), "f1_macro_cv": float(best_trial.values[1]), "accuracy_cv": float(best_trial.values[2])},
-        f, indent=2
-    )
-
-with open(os.path.join(save_dir, "classes_fr.json"), "w") as f:
-    json.dump({int(k): v for k, v in class_names_fr.items()}, f, indent=2, ensure_ascii=False)
-
-print("Saved to:", save_dir)
-
 ```
