@@ -1,65 +1,72 @@
 ```
+
 # ============================================================
-# ORDINAL REGRESSION (MORD) — note 0..10
-# - Train / test
-# - Metrics: MAE, RMSE, R2, Accuracy@±tol
-# - Predict on example row (encoded)
-# - Permutation importance (global)
+# ORDINAL REGRESSION (MORD) — FIX NaN
 # ============================================================
 
 import numpy as np
 import pandas as pd
 
 from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+from sklearn.impute import SimpleImputer
 from sklearn.inspection import permutation_importance
 
-# MORD
 import mord
+
 
 # ==============================
 # 1) DATA (already encoded)
 # ==============================
-# Uses your "no target encoding" encoded matrices
 X_train_ord = X_train_encoded_no_te.copy().astype(float)
 X_test_ord  = X_test_encoded_no_te.copy().astype(float)
 
-y_train_ord = pd.to_numeric(y_train_no_te, errors="coerce").astype(int)
-y_test_ord  = pd.to_numeric(y_test_no_te,  errors="coerce").astype(int)
+y_train_ord = pd.to_numeric(y_train_no_te, errors="coerce").astype(int).clip(0, 10)
+y_test_ord  = pd.to_numeric(y_test_no_te,  errors="coerce").astype(int).clip(0, 10)
 
-# Optional: ensure bounds 0..10
-y_train_ord = y_train_ord.clip(0, 10)
-y_test_ord  = y_test_ord.clip(0, 10)
+# Safety: convert inf -> NaN
+X_train_ord = X_train_ord.replace([np.inf, -np.inf], np.nan)
+X_test_ord  = X_test_ord.replace([np.inf, -np.inf], np.nan)
 
-print("Train:", X_train_ord.shape, y_train_ord.shape)
-print("Test :", X_test_ord.shape,  y_test_ord.shape)
-print("Unique y (train):", sorted(np.unique(y_train_ord)))
+print("NaN count train:", int(np.isnan(X_train_ord.to_numpy()).sum()))
+print("NaN count test :", int(np.isnan(X_test_ord.to_numpy()).sum()))
 
 # ==============================
-# 2) Train Ordinal Regression (MORD)
+# 2) Imputation (CRITICAL for MORD)
+# Fit on train only, apply to train/test
 # ==============================
-# Options:
-# - LogisticAT (All-Threshold)  -> common / robust
-# - LogisticIT (Immediate-Threshold)
-# - LogisticSE (Squared Error like)
-#
-# I recommend starting with LogisticAT
-ord_model = mord.LogisticAT(alpha=1.0)  # alpha = L2 regularization strength
-ord_model.fit(X_train_ord, y_train_ord)
+imputer = SimpleImputer(strategy="median")  # good default for numeric encoded data
+
+X_train_imp = pd.DataFrame(
+    imputer.fit_transform(X_train_ord),
+    columns=X_train_ord.columns,
+    index=X_train_ord.index
+)
+
+X_test_imp = pd.DataFrame(
+    imputer.transform(X_test_ord),
+    columns=X_test_ord.columns,
+    index=X_test_ord.index
+)
+
+print("After impute NaN train:", int(np.isnan(X_train_imp.to_numpy()).sum()))
+print("After impute NaN test :", int(np.isnan(X_test_imp.to_numpy()).sum()))
+
+# ==============================
+# 3) Train Ordinal Regression (MORD)
+# ==============================
+ord_model = mord.LogisticAT(alpha=1.0)
+ord_model.fit(X_train_imp, y_train_ord)
 
 print("Ordinal model trained.")
 
 # ==============================
-# 3) Predict + clip
+# 4) Predict + clip
 # ==============================
-pred_train = ord_model.predict(X_train_ord)
-pred_test  = ord_model.predict(X_test_ord)
-
-# predictions are class labels already (int)
-pred_train = np.clip(pred_train, 0, 10)
-pred_test  = np.clip(pred_test,  0, 10)
+pred_train = np.clip(ord_model.predict(X_train_imp), 0, 10)
+pred_test  = np.clip(ord_model.predict(X_test_imp),  0, 10)
 
 # ==============================
-# 4) Metrics + Accuracy@±tol
+# 5) Metrics + Accuracy@±tol
 # ==============================
 tol = 1.0  # change to 0.5 if you want
 
@@ -86,21 +93,14 @@ print("\n=== ORDINAL REGRESSION (MORD) METRICS ===")
 display(metrics_df)
 
 # ==============================
-# 5) Predict on your example row (encoded)
+# 6) Predict on your example row (encoded)
 # ==============================
-# Priority:
-# - if X_new_encoded_no_te exists: use it
-# - else: you can provide a dict already encoded and we'll align columns
-
 X_example = None
 
 if "X_new_encoded_no_te" in globals():
     X_example = X_new_encoded_no_te.copy()
 elif "example_row_encoded" in globals():
     X_example = pd.DataFrame([example_row_encoded]).copy()
-else:
-    print("No encoded example found. Define X_new_encoded_no_te or example_row_encoded if you want.")
-    X_example = None
 
 if X_example is not None:
     # align columns with training
@@ -111,22 +111,25 @@ if X_example is not None:
     if len(extra_cols) > 0:
         X_example = X_example.drop(columns=extra_cols)
 
-    X_example = X_example[X_train_ord.columns].astype(float)
+    X_example = X_example[X_train_ord.columns].astype(float).replace([np.inf, -np.inf], np.nan)
 
-    pred_ex = int(np.clip(ord_model.predict(X_example)[0], 0, 10))
+    # apply SAME imputer
+    X_example_imp = pd.DataFrame(
+        imputer.transform(X_example),
+        columns=X_example.columns,
+        index=X_example.index
+    )
+
+    pred_ex = int(np.clip(ord_model.predict(X_example_imp)[0], 0, 10))
     print("\n=== Example prediction (MORD) ===")
     print("Predicted note:", pred_ex)
 
 # ==============================
-# 6) Global feature importance (Permutation)
+# 7) Global feature importance (Permutation)
 # ==============================
-# MORD is linear-ish; SHAP tree isn't applicable.
-# Permutation importance gives a clear ranking of influential features.
-#
-# We use neg MAE as scoring (higher is better), so importance is positive when MAE worsens after shuffling.
 perm = permutation_importance(
     ord_model,
-    X_test_ord,
+    X_test_imp,
     y_test_ord,
     scoring="neg_mean_absolute_error",
     n_repeats=5,
@@ -135,12 +138,11 @@ perm = permutation_importance(
 )
 
 importance_df = pd.DataFrame({
-    "feature": X_train_ord.columns.astype(str),
+    "feature": X_train_imp.columns.astype(str),
     "importance_mean": perm.importances_mean,
     "importance_std": perm.importances_std,
 }).sort_values("importance_mean", ascending=False).reset_index(drop=True)
 
 print("\nTop 20 features (Permutation importance, higher = more important):")
 display(importance_df.head(20))
-
 ```
